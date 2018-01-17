@@ -19,13 +19,15 @@ extern crate sha2;
 extern crate simple_asn1;
 
 use digest::{FixedOutput,Input};
-use num::{BigUint,Integer,One,Zero};
+use num::{BigInt,BigUint,Integer,One,Signed,Zero};
+use num::bigint::Sign;
 use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
 use sha2::Sha256;
 use simple_asn1::{ASN1Block,FromASN1,ToASN1,ASN1DecodeErr,ASN1EncodeErr,ASN1Class};
+use std::clone::Clone;
 use std::io;
-use std::ops::{Add,Div,Sub};
+use std::ops::{Add,Div,Neg,Sub};
 
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum DSAParameterSize { L1024N160, L2048N224, L2048N256, L3072N256 }
@@ -337,7 +339,6 @@ fn validate_provable_primes<G: Rng>(rng: &mut G,
     match generate_provable_primes(rng, &ev.first_seed, params) {
         Err(_) => false,
         Ok((p_val, q_val, ev2)) => {
-            println!("{} && {} && {}", (&q_val == q), (&p_val == p), (ev == &ev2));
             // 9. Return SUCCESS
             (&q_val == q) && (&p_val == p) && (ev == &ev2)
         }
@@ -764,7 +765,31 @@ impl DSAKeyPair {
     pub fn generate_w_params_rng<G: Rng>(rng: &mut G, params: &DSAParameters)
         -> Result<DSAKeyPair,DSAGenError>
     {
-        unimplemented!()
+        // 1. N = len(q); L = len(p);
+        let n = n_bits(params.size);
+        // 2. If the (L,N) pair is invalid, then return an ERROR indicator,
+        //    Invalid_x, and Invalid_y.
+        // 3. requested_security_strength = the security strength associated
+        //    with the (L, N) pair; see SP 800-57.
+        // 4. Obtain a string of N+64 returned_bits from an RBG with a security
+        //    strength of requested_security_strength or more. If an ERROR
+        //    indication is returned, then return an ERROR indication,
+        //    Invalid_x, and Invalid_y.
+        let returned_bits: Vec<u8> = rng.gen_iter().take(n + 8).collect();
+        // 5. Convert returned_bits to the (non-negative) integer c.
+        let c = BigUint::from_bytes_be(&returned_bits);
+        // 6. x = (c mod (q-1)) + 1.
+        let one = BigUint::from(1 as u64);
+        let x = (&c % (&params.q - &one)) + &one;
+        // 7. y = g^x mod p
+        let y = params.g.modpow(&x, &params.p);
+        // 8. Return SUCCESS, x, and y.
+        let private = DSAPrivateKey { params: params.clone(), x: x };
+        let public  = DSAPublicKey  { params: params.clone(), y: y };
+        Ok(DSAKeyPair {
+            private: private,
+            public: public
+        })
     }
 }
 
@@ -789,6 +814,48 @@ impl DSAPublicKey {
             y: y
         }
     }
+
+    pub fn verify<Hash>(&self, h: Hash, m: &[u8], sig: &DSASignature)
+        -> bool
+      where Hash: Clone + Input + FixedOutput
+    {
+        if sig.r >= self.params.q {
+            return false;
+        }
+        if sig.s >= self.params.q {
+            return false;
+        }
+        let n = n_bits(self.params.size) / 8;
+        // w = (s')^-1 mod q;
+        let w = modinv(&sig.s, &self.params.q);
+        // z = the leftmost min(N, outlen) bits of Hash(M').
+        let mut digest = h.clone();
+        digest.process(m);
+        let z = { let bytes: Vec<u8> = digest.fixed_result()
+                                             .as_slice()
+                                             .iter()
+                                             .take(n)
+                                             .map(|x| *x)
+                                             .collect();
+                  BigUint::from_bytes_be(&bytes) };
+        // u1 = (zw) mod q
+        let u1 = (&z * &w) % &self.params.q;
+        // u2 = (rw) mod q
+        let u2 = (&sig.r * &w) % &self.params.q;
+        // v = (((g)^u1(y)^u2) mod p) mod q
+        let v_1 = self.params.g.modpow(&u1, &self.params.p);
+        let v_2 = self.params.g.modpow(&u2, &self.params.p);
+        let v = ((&v_1 * &v_2) % &self.params.p) % &self.params.q;
+        // if v = r, then the signature is verified
+        v == sig.r
+    }
+}
+
+/// A DSA Signature
+#[derive(Clone,Debug,PartialEq)]
+pub struct DSASignature {
+    r: BigUint,
+    s: BigUint
 }
 
 fn miller_rabin<G: Rng>(g: &mut G, n: &BigUint, iters: usize)
@@ -857,6 +924,55 @@ fn random_number<G: Rng>(rng: &mut G, bitlen: usize) -> BigUint {
     let wordlen = bitlen / 32;
     let components = rng.gen_iter().take(wordlen).collect();
     BigUint::new(components)
+}
+
+// fast modular inverse
+pub fn modinv(e: &BigUint, phi: &BigUint) -> BigUint {
+    let (_, mut x, _) = extended_euclidean(&e, &phi);
+    let int_phi = BigInt::from_biguint(Sign::Plus, phi.clone());
+    while x.is_negative() {
+        x = x + &int_phi;
+    }
+    x.to_biguint().unwrap()
+}
+
+fn extended_euclidean(a: &BigUint, b: &BigUint) -> (BigInt, BigInt, BigInt) {
+    let pos_int_a = BigInt::from_biguint(Sign::Plus, a.clone());
+    let pos_int_b = BigInt::from_biguint(Sign::Plus, b.clone());
+    let (d, x, y) = egcd(pos_int_a, pos_int_b);
+
+    if d.is_negative() {
+        (d.neg(), x.neg(), y.neg())
+    } else {
+        (d, x, y)
+    }
+}
+
+fn egcd(a: BigInt, b: BigInt) -> (BigInt, BigInt, BigInt) {
+    let mut s: BigInt = Zero::zero();
+    let mut old_s     = One::one();
+    let mut t: BigInt = One::one();
+    let mut old_t     = Zero::zero();
+    let mut r         = b.clone();
+    let mut old_r     = a.clone();
+
+    while !r.is_zero() {
+        let quotient = old_r.clone() / r.clone();
+
+        let prov_r = r.clone();
+        let prov_s = s.clone();
+        let prov_t = t.clone();
+
+        r = old_r - (r * &quotient);
+        s = old_s - (s * &quotient);
+        t = old_t - (t * &quotient);
+
+        old_r = prov_r;
+        old_s = prov_s;
+        old_t = prov_t;
+    }
+
+    (old_r, old_s, old_t)
 }
 
 
