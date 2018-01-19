@@ -19,6 +19,8 @@ extern crate sha1;
 extern crate sha2;
 extern crate simple_asn1;
 
+mod rfc6979;
+
 use digest::{BlockInput,FixedOutput,Input};
 use digest::generic_array::ArrayLength;
 use hmac::{Hmac,Mac};
@@ -26,6 +28,7 @@ use num::{BigInt,BigUint,Integer,One,Signed,Zero};
 use num::bigint::Sign;
 use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
+use rfc6979::KIterator;
 use sha2::Sha256;
 use simple_asn1::{ASN1Block,FromASN1,ToASN1,ASN1DecodeErr,ASN1EncodeErr,ASN1Class};
 use std::clone::Clone;
@@ -875,185 +878,6 @@ impl DSAPrivateKey {
     }
 }
 
-struct KIterator<H>
-  where
-    H: Clone + BlockInput + Input + FixedOutput + Default,
-    H::BlockSize : ArrayLength<u8>
-{
-    hmac_k: Hmac<H>,
-    v: Vec<u8>,
-    q: BigUint,
-    qlen: usize
-}
-
-impl<H> KIterator<H>
-  where
-    H: Clone + BlockInput + Input + FixedOutput + Default,
-    Hmac<H>: Clone,
-    H::BlockSize : ArrayLength<u8>
-{
-    fn new(h1: &[u8], qlen: usize, q: &BigUint, x: &BigUint) -> KIterator<H>
-    {
-        // this little bit at the top computes bits2octets(h1)
-        let numh = BigUint::from_bytes_be(h1);
-        let numhmodq = &numh % q;
-        let mut h1prime = numhmodq.to_bytes_be();
-        while h1prime.len() < qlen {
-            h1prime.insert(0,0);
-        }
-        // Given the input message m, the following process is applied:
-        //
-        // a.  Process m through the hash function H, yielding:
-        //
-        //           h1 = H(m)
-        //
-        //     (h1 is a sequence of hlen bits).
-        //
-        let hlen = h1.len();
-        // b.  Set:
-        //
-        //           V = 0x01 0x01 0x01 ... 0x01
-        //
-        //     such that the length of V, in bits, is equal to 8*ceil(hlen/8).
-        //     For instance, on an octet-based system, if H is SHA-256, then
-        //     V is set to a sequence of 32 octets of value 1.  Note that in
-        //     this step and all subsequent steps, we use the same H function
-        //     as the one used in step 'a' to process the input message; this
-        //     choice will be discussed in more detail in Section 3.6.
-        //
-        let mut v = Vec::new();
-        v.resize(hlen, 0x01);
-        {
-            let vint = BigUint::from_bytes_be(&v);
-            println!("k after step c: {:X}", vint);
-        }
-        // c.  Set:
-        //
-        //           K = 0x00 0x00 0x00 ... 0x00
-        //
-        //     such that the length of K, in bits, is equal to 8*ceil(hlen/8).
-        let mut k = Vec::new();
-        k.resize(hlen, 0x00);
-        {
-            let kint = BigUint::from_bytes_be(&k);
-            println!("k after step c: {:X}", kint);
-        }
-        // d.  Set:
-        //
-        //           K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
-        //
-        //     where '||' denotes concatenation.  In other words, we compute
-        //     HMAC with key K, over the concatenation of the following, in
-        //     order: the current value of V, a sequence of eight bits of value
-        //     0, the encoding of the (EC)DSA private key x, and the hashed
-        //     message (possibly truncated and extended as specified by the
-        //     bits2octets transform).  The HMAC result is the new value of K.
-        //     Note that the private key x is in the [1, q-1] range, hence a
-        //     proper input for int2octets, yielding rlen bits of output, i.e.,
-        //     an integral number of octets (rlen is a multiple of 8).
-        let mut hmac_k = Hmac::<H>::new(&k).unwrap();
-        let mut xbytes: Vec<u8> = x.to_bytes_be();
-        while xbytes.len() < qlen {
-            xbytes.insert(0,0);
-        }
-        println!("xbytes: {:?}", xbytes);
-        let mut input = Vec::new();
-        input.extend_from_slice(&v);
-        input.push(0x00);
-        input.extend_from_slice(&xbytes);
-        input.extend_from_slice(&h1prime);
-        hmac_k.input(&input);
-        k = hmac_k.result().code().as_slice().to_vec();
-        println!("kbase: {:?}", k);
-        {
-            let kint = BigUint::from_bytes_be(&k);
-            println!("k after step d: {:X}", kint);
-        }
-        // e.  Set:
-        //
-        //           V = HMAC_K(V)
-        hmac_k = Hmac::<H>::new(&k).unwrap();
-        let mut hmack = hmac_k.clone();
-        hmack.input(&v);
-        v = hmack.result().code().as_slice().to_vec();
-        {
-            let vint = BigUint::from_bytes_be(&v);
-            println!("v after step e: {:X}", vint);
-        }
-        // ...
-        {
-            let vint = BigUint::from_bytes_be(&v);
-            println!("iterator v: {:X}", vint);
-        }
-        KIterator {
-            hmac_k: hmac_k,
-            v: v,
-            q: q.clone(),
-            qlen: qlen
-        }
-    }
-}
-
-impl<H> Iterator for KIterator<H>
-  where
-    H: Clone + BlockInput + Input + FixedOutput + Default,
-    Hmac<H>: Clone,
-    H::BlockSize : ArrayLength<u8>
-{
-    type Item = BigUint;
-
-    fn next(&mut self) -> Option<BigUint> {
-        loop {
-           // h.  Apply the following algorithm until a proper value is found
-           //     for k:
-           //
-           //     1.  Set T to the empty sequence.  The length of T (in bits) is
-           //         denoted tlen; thus, at that point, tlen = 0.
-           let mut t = Vec::new();
-           //
-           //     2.  While tlen < qlen, do the following:
-           //
-           //               V = HMAC_K(V)
-           //               T = T || V
-           while t.len() < self.qlen {
-               let mut hmack = self.hmac_k.clone();
-               hmack.input(&self.v);
-               let mut newbytes = hmack.result().code().as_slice().to_vec();
-               t.extend_from_slice(&newbytes);
-           }
-           //
-           //      3.  Compute:
-           //
-           //               k = bits2int(T)
-           let resk = BigUint::from_bytes_be(&t);
-           println!("Proposed k: {:X}", resk);
-           //
-           //          If that value of k is within the [1,q-1] range, and is
-           //          suitable for DSA or ECDSA (i.e., it results in an r value
-           //          that is not 0; see Section 3.4), then the generation of k
-           //          is finished.  The obtained value of k is used in DSA or
-           //          ECDSA.  Otherwise, compute:
-           //
-           //               K = HMAC_K(V || 0x00)
-           let mut vp0 = self.v.clone();
-           vp0.push(0x00);
-           let mut hmack1 = self.hmac_k.clone();
-           hmack1.input(&vp0);
-           let k = hmack1.result().code().as_slice().to_vec();
-           self.hmac_k = Hmac::<H>::new(&k).unwrap();
-           //               V = HMAC_K(V)
-           let mut hmack2 = self.hmac_k.clone();
-           hmack2.input(&self.v);
-           self.v = hmack2.result().code().as_slice().to_vec();
-           //
-           //          and loop (try to generate a new T, and so on).
-           //
-           if !resk.is_zero() && (&resk < &self.q) {
-           }
-        }
-    }
-}
-
 /// A DSA key pair
 #[derive(Clone,Debug,PartialEq)]
 pub struct DSAPublicKey {
@@ -1281,31 +1105,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rfc6979_k_gen_example() {
-        let qbytes = vec![0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                          0x00, 0x02, 0x01, 0x08, 0xA2, 0xE0, 0xCC, 0x0D, 0x99,
-                          0xF8, 0xA5, 0xEF];
-        let xbytes = vec![0x00, 0x9A, 0x4D, 0x67, 0x92, 0x29, 0x5A, 0x7F, 0x73,
-                          0x0F, 0xC3, 0xF2, 0xB4, 0x9C, 0xBC, 0x0F, 0x62, 0xE8,
-                          0x62, 0x27, 0x2F];
-        let q = BigUint::from_bytes_be(&qbytes);
-        let x = BigUint::from_bytes_be(&xbytes);
-        let h1 = vec![0xAF, 0x2B, 0xDB, 0xE1, 0xAA, 0x9B, 0x6E, 0xC1, 0xE2,
-                      0xAD, 0xE1, 0xD6, 0x94, 0xF4, 0x1F, 0xC7, 0x1A, 0x83,
-                      0x1D, 0x02, 0x68, 0xE9, 0x89, 0x15, 0x62, 0x11, 0x3D,
-                      0x8A, 0x62, 0xAD, 0xD1, 0xBF];
-        let mut iter = KIterator::<Sha256>::new(&h1, 21, &q, &x);
-        match iter.next() {
-            None =>
-                assert!(false),
-            Some(x) => {
-                let target = vec![0x02, 0x3A, 0xF4, 0x07, 0x4C, 0x90, 0xA0,
-                                  0x2B, 0x3F, 0xE6, 0x1D, 0x28, 0x6D, 0x5C,
-                                  0x87, 0xF4, 0x25, 0xE6, 0xBD, 0xD8, 0x1B];
-                let x2 = BigUint::from_bytes_be(&target);
-                assert_eq!(x, x2);
-            }
-        }
-    }
 }
