@@ -11,9 +11,6 @@
 extern crate digest;
 extern crate hmac;
 extern crate num;
-#[cfg(test)]
-#[macro_use]
-extern crate quickcheck;
 extern crate rand;
 extern crate sha1;
 extern crate sha2;
@@ -23,14 +20,14 @@ mod rfc6979;
 
 use digest::{BlockInput,FixedOutput,Input};
 use digest::generic_array::ArrayLength;
-use hmac::{Hmac,Mac};
+use hmac::Hmac;
 use num::{BigInt,BigUint,Integer,One,Signed,Zero};
 use num::bigint::Sign;
 use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
 use rfc6979::{KIterator,bits2int};
 use sha2::Sha256;
-use simple_asn1::{ASN1Block,FromASN1,ToASN1,ASN1DecodeErr,ASN1EncodeErr,ASN1Class};
+use simple_asn1::{ASN1DecodeErr};
 use std::clone::Clone;
 use std::cmp::min;
 use std::io;
@@ -143,6 +140,15 @@ impl DSAParameters {
     {
         let g = generate_verifiable_generator(&p, &q, &ev, idx)?;
         Ok(DSAParameters{ size: ps, p: p, q: q, g: g })
+    }
+
+    /// Given the set of inputs you used to generate your system, verify that
+    /// everything makes sense.
+    pub fn verify_g(p: &BigUint, g: &BigUint, q: &BigUint,
+                    ev: &DSAGenEvidence, idx: u8)
+        -> bool
+    {
+        verify_generator(p, q, ev, idx, g)
     }
 
     /// Given the provided evidence, validate that the domain parameters
@@ -414,7 +420,7 @@ fn verify_generator(p: &BigUint, q: &BigUint, ev: &DSAGenEvidence,
         return false;
     }
     // 4. N = len(q)
-    let n = ((q.bits() + 15) / 15) * 15;
+    // let n = ((q.bits() + 15) / 15) * 15;
     // 5. e = (p - 1) / q
     let e = (p - &one) / q;
     // 6. count = 0
@@ -552,9 +558,9 @@ fn shawe_taylor_large<G: Rng>(rng: &mut G, length: usize, input_seed: &BigUint)
     //        x = x + (Hash(prime_seed + i) ∗ 2^(i * outlen)).
     //
     //  We're going to actually run this backwards. What this computation
-    //  does is essentially built up a large vector of hashes, one per iteration,
-    //  shifting them bast each other via the 2^(i * outlen) term. So we'll just
-    //  do this directly.
+    //  does is essentially built up a large vector of hashes, one per
+    //  iteration, shifting them bast each other via the 2^(i * outlen)
+    //  term. So we'll just do this directly.
     let mut i: i64 = iterations as i64;
     while i >= 0 {
         let bigi = BigUint::from_i64(i).unwrap();
@@ -573,7 +579,8 @@ fn shawe_taylor_large<G: Rng>(rng: &mut G, length: usize, input_seed: &BigUint)
     let twoc0 = &two * &c0;
     let mut t: BigUint = ceildiv(&x, &twoc0);
     loop {
-        // 23. If (2tc0 + 1 > 2^length), then t = ceiling(2^(length – 1) / (2c0)).
+        // 23. If (2tc0 + 1 > 2^length), then
+        //       t = ceiling(2^(length – 1) / (2c0)).
         let twotc0 = &t * &twoc0;
         if (&twotc0 + &one) > (&one << length) {
             t = ceildiv(&twolm1, &twoc0);
@@ -588,7 +595,8 @@ fn shawe_taylor_large<G: Rng>(rng: &mut G, length: usize, input_seed: &BigUint)
         // 27. For i = 0 to iterations do
         //           a = a + (Hash(prime_seed + i) ∗ 2 i * outlen).
         //
-        //  As with the last time we did this, we're going to do this more constructively
+        //  As with the last time we did this, we're going to do this more
+        //  constructively
         i = iterations as i64;
         while i >= 0 {
             let bigi = BigUint::from_i64(i).unwrap();
@@ -835,7 +843,7 @@ impl DSAPrivateKey {
                                 .iter()
                                 .map(|x| *x)
                                 .collect();
-        let h0 = bits2int(&h1, &self.params.q, n);
+        let h0 = bits2int(&h1, n);
         let h = h0.mod_floor(&self.params.q);
 
         // 2.  A random value modulo q, dubbed k, is generated.  That value
@@ -898,7 +906,6 @@ impl DSAPublicKey {
         if sig.s >= self.params.q {
             return false;
         }
-        let n = n_bits(self.params.size);
         // w = (s')^-1 mod q;
         let w = modinv(&sig.s, &self.params.q);
         // z = the leftmost min(N, outlen) bits of Hash(M').
@@ -920,7 +927,8 @@ impl DSAPublicKey {
         // v = (((g)^u1(y)^u2) mod p) mod q
         let v_1 = self.params.g.modpow(&u1, &self.params.p);
         let v_2 = self.y.modpow(&u2, &self.params.p);
-        let v = (&v_1 * &v_2).mod_floor(&self.params.p).mod_floor(&self.params.q);
+        let v = (&v_1 * &v_2).mod_floor(&self.params.p)
+                             .mod_floor(&self.params.q);
         // if v = r, then the signature is verified
         v == sig.r
     }
@@ -933,73 +941,6 @@ pub struct DSASignature {
     s: BigUint
 }
 
-fn miller_rabin<G: Rng>(g: &mut G, n: &BigUint, iters: usize)
-    -> bool
-{
-    let one: BigUint = One::one();
-    let two = &one + &one;
-    let nm1 = n - &one;
-    // Quoth Wikipedia:
-    // write n - 1 as 2^r*d with d odd by factoring powers of 2 from n - 1
-    let mut d = nm1.clone();
-    let mut r = 0;
-    while d.is_even() {
-        d >>= 1;
-        r += 1;
-        assert!(r < n.bits());
-    }
-    // WitnessLoop: repeat k times
-    'WitnessLoop: for _k in 0..iters {
-        // pick a random integer a in the range [2, n - 2]
-        let a = random_in_range(g, &two, &nm1);
-        // x <- a^d mod n
-        let mut x = a.modpow(&d, &n);
-        // if x = 1 or x = n - 1 then
-        if (&x == &one) || (&x == &nm1) {
-            // continue WitnessLoop
-            continue 'WitnessLoop;
-        }
-        // repeat r - 1 times:
-        for _i in 0..r {
-            // x <- x^2 mod n
-            x = x.modpow(&two, &n);
-            // if x = 1 then
-            if &x == &one {
-                // return composite
-                return false;
-            }
-            // if x = n - 1 then
-            if &x == &nm1 {
-                // continue WitnessLoop
-                continue 'WitnessLoop;
-            }
-        }
-        // return composite
-        return false;
-    }
-    // return probably prime
-    true
-}
-
-fn random_in_range<G: Rng>(rng: &mut G, min: &BigUint, max: &BigUint)
-    -> BigUint
-{
-    let bitlen = ((max.bits() + 31) / 32) * 32;
-    loop {
-        let candidate = random_number(rng, bitlen);
-
-        if (&candidate >= min) && (&candidate < max) {
-            return candidate;
-        }
-    }
-}
-
-fn random_number<G: Rng>(rng: &mut G, bitlen: usize) -> BigUint {
-    assert!(bitlen % 32 == 0);
-    let wordlen = bitlen / 32;
-    let components = rng.gen_iter().take(wordlen).collect();
-    BigUint::new(components)
-}
 
 // fast modular inverse
 pub fn modinv(e: &BigUint, phi: &BigUint) -> BigUint {
@@ -1053,38 +994,93 @@ fn egcd(a: BigInt, b: BigInt) -> (BigInt, BigInt, BigInt) {
 
 #[cfg(test)]
 mod tests {
-//    use quickcheck::{Arbitrary,Gen};
     use sha1::Sha1;
     use sha2::{Sha224,Sha256,Sha384,Sha512};
     use super::*;
 
-//    const DSA_SIZES: [DSAParameterSize; 4] =
-//        [DSAParameterSize::L1024N160,
-//         DSAParameterSize::L2048N224,
-//         DSAParameterSize::L2048N256,
-//         DSAParameterSize::L3072N256];
-//
-//    impl Arbitrary for DSAParameterSize {
-//        fn arbitrary<G: Gen>(g: &mut G) -> DSAParameterSize {
-//            g.choose(&DSA_SIZES).unwrap().clone()
-//        }
-//    }
-
     const NUM_TESTS: u32 = 2;
 
-    //#[test]
+    fn miller_rabin<G: Rng>(g: &mut G, n: &BigUint, iters: usize)
+        -> bool
+    {
+        let one: BigUint = One::one();
+        let two = &one + &one;
+        let nm1 = n - &one;
+        // Quoth Wikipedia:
+        // write n - 1 as 2^r*d with d odd by factoring powers of 2 from n - 1
+        let mut d = nm1.clone();
+        let mut r = 0;
+        while d.is_even() {
+            d >>= 1;
+            r += 1;
+            assert!(r < n.bits());
+        }
+        // WitnessLoop: repeat k times
+        'WitnessLoop: for _k in 0..iters {
+            // pick a random integer a in the range [2, n - 2]
+            let a = random_in_range(g, &two, &nm1);
+            // x <- a^d mod n
+            let mut x = a.modpow(&d, &n);
+            // if x = 1 or x = n - 1 then
+            if (&x == &one) || (&x == &nm1) {
+                // continue WitnessLoop
+                continue 'WitnessLoop;
+            }
+            // repeat r - 1 times:
+            for _i in 0..r {
+                // x <- x^2 mod n
+                x = x.modpow(&two, &n);
+                // if x = 1 then
+                if &x == &one {
+                    // return composite
+                    return false;
+                }
+                // if x = n - 1 then
+                if &x == &nm1 {
+                    // continue WitnessLoop
+                    continue 'WitnessLoop;
+                }
+            }
+            // return composite
+            return false;
+        }
+        // return probably prime
+        true
+    }
+
+    fn random_in_range<G: Rng>(rng: &mut G, min: &BigUint, max: &BigUint)
+        -> BigUint
+    {
+        let bitlen = ((max.bits() + 31) / 32) * 32;
+        loop {
+            let candidate = random_number(rng, bitlen);
+
+            if (&candidate >= min) && (&candidate < max) {
+                return candidate;
+            }
+        }
+    }
+
+    fn random_number<G: Rng>(rng: &mut G, bitlen: usize) -> BigUint {
+        assert!(bitlen % 32 == 0);
+        let wordlen = bitlen / 32;
+        let components = rng.gen_iter().take(wordlen).collect();
+        BigUint::new(components)
+    }
+
+    #[test]
     fn shawe_taylor_works() {
         let mut rng = OsRng::new().unwrap();
         let params = DSAParameterSize::L1024N160;
 
         for _ in 0..NUM_TESTS {
             let seed = get_input_seed(&mut rng,params,n_bits(params)).unwrap();
-            let (v, _, _) = shawe_taylor(&mut rng,n_bits(params),&seed).unwrap();
+            let (v,_,_) = shawe_taylor(&mut rng,n_bits(params),&seed).unwrap();
             assert!(miller_rabin(&mut rng, &v, 64));
         }
     }
 
-    //#[test]
+    #[test]
     fn pqg_generation_checks() {
         let mut rng = OsRng::new().unwrap();
         let params = DSAParameterSize::L1024N160;
@@ -1100,21 +1096,6 @@ mod tests {
         }
     }
 
-    fn get_first_k<H>(msg: &[u8], qlen: usize, q: &BigUint, x: &BigUint)
-        -> Vec<u8>
-      where
-        H: Clone + BlockInput + Input + FixedOutput + Default,
-        Hmac<H>: Clone,
-        H::BlockSize : ArrayLength<u8>
-    {
-        let mut hash = <H>::default();
-        hash.process(msg);
-        let h1 = hash.fixed_result().as_slice().to_vec();
-        let mut iter = KIterator::<H>::new(&h1, qlen, q, x);
-        let mut val = iter.next().unwrap();
-        val.to_bytes_be()
-    }
-
     macro_rules! run_rfc6979_test {
         ($hash: ty, $val: ident, $public: ident, $private: ident,
          k $k: expr,
@@ -1125,7 +1106,6 @@ mod tests {
             let h1 = digest.fixed_result().as_slice().to_vec();
             let rbytes = $r;
             let sbytes = $s;
-            let kbytes = $k;
             let r = BigUint::from_bytes_be(&rbytes);
             let s = BigUint::from_bytes_be(&sbytes);
             let mut iter = KIterator::<$hash>::new(&h1,
@@ -1207,7 +1187,6 @@ mod tests {
         let y = BigUint::from_bytes_be(&ybytes);
         let private = DSAPrivateKey::new(&params, x);
         let public = DSAPublicKey::new(&params, y);
-        let size = DSAParameterSize::L1024N160;
         //
         let sample: [u8; 6] = [115, 97, 109, 112, 108, 101]; // "sample", ASCII
         let test:   [u8; 4] = [116, 101, 115, 116]; // "test", ASCII

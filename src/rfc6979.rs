@@ -1,9 +1,10 @@
 use digest::{BlockInput,FixedOutput,Input};
 use digest::generic_array::ArrayLength;
 use hmac::{Hmac,Mac};
-use num::{BigUint,One,Zero};
+use num::{BigUint,Zero};
 use std::clone::Clone;
 
+#[allow(non_snake_case)]
 pub struct KIterator<H>
   where
     H: Clone + BlockInput + Input + FixedOutput + Default,
@@ -43,6 +44,7 @@ impl<H> KIterator<H>
         //     as the one used in step 'a' to process the input message; this
         //     choice will be discussed in more detail in Section 3.6.
         //
+        #[allow(non_snake_case)]
         let mut V = Vec::new();
         V.resize(hlen, 0x01);
         // c.  Set:
@@ -50,6 +52,7 @@ impl<H> KIterator<H>
         //           K = 0x00 0x00 0x00 ... 0x00
         //
         //     such that the length of K, in bits, is equal to 8*ceil(hlen/8).
+        #[allow(non_snake_case)]
         let mut K = Vec::new();
         K.resize(hlen, 0x00);
         // d.  Set:
@@ -132,7 +135,7 @@ impl<H> Iterator for KIterator<H>
            //      3.  Compute:
            //
            //               k = bits2int(T)
-           let resk = bits2int(&t, &self.q, self.qlen);
+           let resk = bits2int(&t, self.qlen);
            //
            //          If that value of k is within the [1,q-1] range, and is
            //          suitable for DSA or ECDSA (i.e., it results in an r value
@@ -143,9 +146,10 @@ impl<H> Iterator for KIterator<H>
            //               K = HMAC_K(V || 0x00)
            let mut input = self.V.clone();
            input.push(0x00);
-           let nextK = runhmac(&self.hmac_k, &input);
+           #[allow(non_snake_case)]
+           let K = runhmac(&self.hmac_k, &input);
            //               V = HMAC_K(V)
-           self.hmac_k = Hmac::<H>::new(&nextK).unwrap();
+           self.hmac_k = Hmac::<H>::new(&K).unwrap();
            self.V = runhmac(&self.hmac_k, &self.V);
            //
            //          and loop (try to generate a new T, and so on).
@@ -157,7 +161,7 @@ impl<H> Iterator for KIterator<H>
     }
 }
 
-pub fn bits2int(x: &[u8], q: &BigUint, qlen: usize) -> BigUint {
+pub fn bits2int(x: &[u8], qlen: usize) -> BigUint {
     let mut value = BigUint::from_bytes_be(x);
     let vlen = x.len() * 8;
 
@@ -169,7 +173,7 @@ pub fn bits2int(x: &[u8], q: &BigUint, qlen: usize) -> BigUint {
 }
 
 fn bits2octets(x: &[u8], q: &BigUint, qlen: usize) -> Vec<u8> {
-    let z1 = bits2int(x, q, qlen);
+    let z1 = bits2int(x, qlen);
     let res = if &z1 > q { z1 - q } else { z1 };
     int2octets(&res, qlen)
 }
@@ -216,20 +220,20 @@ mod tests {
     use sha2::Sha256;
     use super::*;
 
-    const qbytes: [u8; 21] = [0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    const QBYTES: [u8; 21] = [0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                               0x00, 0x00, 0x02, 0x01, 0x08, 0xA2, 0xE0, 0xCC,
                               0x0D, 0x99, 0xF8, 0xA5, 0xEF];
-    const xbytes: [u8; 21] = [0x00, 0x9A, 0x4D, 0x67, 0x92, 0x29, 0x5A, 0x7F,
+    const XBYTES: [u8; 21] = [0x00, 0x9A, 0x4D, 0x67, 0x92, 0x29, 0x5A, 0x7F,
                               0x73, 0x0F, 0xC3, 0xF2, 0xB4, 0x9C, 0xBC, 0x0F,
                               0x62, 0xE8, 0x62, 0x27, 0x2F];
-    const h1: [u8; 32]     = [0xAF, 0x2B, 0xDB, 0xE1, 0xAA, 0x9B, 0x6E, 0xC1,
+    const H1: [u8; 32]     = [0xAF, 0x2B, 0xDB, 0xE1, 0xAA, 0x9B, 0x6E, 0xC1,
                               0xE2, 0xAD, 0xE1, 0xD6, 0x94, 0xF4, 0x1F, 0xC7,
                               0x1A, 0x83, 0x1D, 0x02, 0x68, 0xE9, 0x89, 0x15,
                               0x62, 0x11, 0x3D, 0x8A, 0x62, 0xAD, 0xD1, 0xBF];
 
     #[test]
     fn int2octets_example() {
-        let x = BigUint::from_bytes_be(&xbytes);
+        let x = BigUint::from_bytes_be(&XBYTES);
         let octets = int2octets(&x, 163);
         let target = vec![0x00, 0x9A, 0x4D, 0x67, 0x92, 0x29, 0x5A, 0x7F,
                           0x73, 0x0F, 0xC3, 0xF2, 0xB4, 0x9C, 0xBC, 0x0F,
@@ -239,8 +243,8 @@ mod tests {
 
     #[test]
     fn bits2octets_example() {
-        let q = BigUint::from_bytes_be(&qbytes);
-        let octets = bits2octets(&h1, &q, 163);
+        let q = BigUint::from_bytes_be(&QBYTES);
+        let octets = bits2octets(&H1, &q, 163);
         let target = vec![0x01, 0x79, 0x5E, 0xDF, 0x0D, 0x54, 0xDB, 0x76,
                           0x0F, 0x15, 0x6D, 0x0D, 0xAC, 0x04, 0xC0, 0x32,
                           0x2B, 0x3A, 0x20, 0x42, 0x24];
@@ -249,9 +253,9 @@ mod tests {
 
     #[test]
     fn k_gen_example() {
-        let q = BigUint::from_bytes_be(&qbytes);
-        let x = BigUint::from_bytes_be(&xbytes);
-        let mut iter = KIterator::<Sha256>::new(&h1, 163, &q, &x);
+        let q = BigUint::from_bytes_be(&QBYTES);
+        let x = BigUint::from_bytes_be(&XBYTES);
+        let mut iter = KIterator::<Sha256>::new(&H1, 163, &q, &x);
         match iter.next() {
             None =>
                 assert!(false),
