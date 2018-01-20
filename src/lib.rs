@@ -28,10 +28,11 @@ use num::{BigInt,BigUint,Integer,One,Signed,Zero};
 use num::bigint::Sign;
 use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
-use rfc6979::KIterator;
+use rfc6979::{KIterator,bits2int};
 use sha2::Sha256;
 use simple_asn1::{ASN1Block,FromASN1,ToASN1,ASN1DecodeErr,ASN1EncodeErr,ASN1Class};
 use std::clone::Clone;
+use std::cmp::min;
 use std::io;
 use std::ops::{Add,Div,Neg,Sub};
 
@@ -304,7 +305,6 @@ fn validate_provable_primes<G: Rng>(rng: &mut G,
     let n = ((q.bits() + 15) / 16) * 16;
     // 3. Check that the (L, N) pair is in the list of acceptable (L, N) pairs.
     //    If the pair is not in the list, then return failure.
-    println!("params ({}, {})", l, n);
     let params = match (l, n) {
                      (1024, 160) => DSAParameterSize::L1024N160,
                      (2048, 224) => DSAParameterSize::L2048N224,
@@ -315,25 +315,21 @@ fn validate_provable_primes<G: Rng>(rng: &mut G,
     // 4. If (firstseed < 2^(n-1), then return FAILURE.
     let twon1 = &one << (n - 1);
     if &ev.first_seed < &twon1 {
-        println!("failed at step 4");
         return false;
     }
     // 5. If (2^n <= q), then return FAILURE.
     let twon = &one << n;
     if &twon <= q {
-        println!("failed at step 5");
         return false;
     }
     // 6. If (2^l <= p), then return FAILURE.
     let twol = &one << l;
     if &twol <= p {
-        println!("failed at step 6");
         return false;
     }
     // 7. If ((p - 1) mod q /= 0), then return FAILURE.
     let pm1 = p - &one;
     if !pm1.mod_floor(&q).is_zero() {
-        println!("failed at step 7");
         return false;
     }
     // 8. Using L, N and firstseed, perform the constructive prime generation
@@ -814,7 +810,7 @@ impl DSAPrivateKey {
         }
     }
 
-    pub fn sign<Hash>(&self, hash: &Hash, m: &[u8]) -> DSASignature
+    pub fn sign<Hash>(&self, m: &[u8]) -> DSASignature
       where
         Hash: Clone + BlockInput + Input + FixedOutput + Default,
         Hmac<Hash>: Clone,
@@ -831,17 +827,16 @@ impl DSAPrivateKey {
         //     As was noted in the description of bits2octets, the extra
         //     modular reduction is no more than a conditional subtraction.
         //
-        let mut digest = hash.clone();
+        let mut digest = <Hash>::default();
         digest.process(m);
-        let n = n_bits(self.params.size) / 8;
+        let n = n_bits(self.params.size);
         let h1: Vec<u8> = digest.fixed_result()
                                 .as_slice()
                                 .iter()
-                                .take(n)
                                 .map(|x| *x)
                                 .collect();
-        let z = BigUint::from_bytes_be(&h1);
-        let h = &z % &self.params.q;
+        let h0 = bits2int(&h1, &self.params.q, n);
+        let h = h0.mod_floor(&self.params.q);
 
         // 2.  A random value modulo q, dubbed k, is generated.  That value
         //     shall not be 0; hence, it lies in the [1, q-1] range.  Most
@@ -871,7 +866,8 @@ impl DSAPrivateKey {
             //           s = (h+x*r)/k mod q
             //
             //     The pair (r, s) is the signature.
-            let s = ((&h + (&self.x * &r)) / &k) % &self.params.q;
+            let kinv = modinv(&k, &self.params.q);
+            let s = ((&h + (&self.x * &r)) * &kinv) % &self.params.q;
             return DSASignature{ r: r, s: s };
         }
         panic!("The world is broken; couldn't find a k in sign().");
@@ -893,8 +889,8 @@ impl DSAPublicKey {
         }
     }
 
-    pub fn verify<Hash>(&self, h: Hash, m: &[u8], sig: &DSASignature) -> bool
-      where Hash: Clone + Input + FixedOutput
+    pub fn verify<Hash>(&self, m: &[u8], sig: &DSASignature) -> bool
+      where Hash: Clone + Default + Input + FixedOutput
     {
         if sig.r >= self.params.q {
             return false;
@@ -902,27 +898,29 @@ impl DSAPublicKey {
         if sig.s >= self.params.q {
             return false;
         }
-        let n = n_bits(self.params.size) / 8;
+        let n = n_bits(self.params.size);
         // w = (s')^-1 mod q;
         let w = modinv(&sig.s, &self.params.q);
         // z = the leftmost min(N, outlen) bits of Hash(M').
-        let mut digest = h.clone();
+        let mut digest = <Hash>::default();
         digest.process(m);
-        let z = { let bytes: Vec<u8> = digest.fixed_result()
-                                             .as_slice()
-                                             .iter()
-                                             .take(n)
-                                             .map(|x| *x)
-                                             .collect();
+        let z = { let mut bytes: Vec<u8> = digest.fixed_result()
+                                                 .as_slice()
+                                                 .iter()
+                                                 .map(|x| *x)
+                                                 .collect();
+                  let n = n_bits(self.params.size) / 8;
+                  let len = min(n, bytes.len());
+                  bytes.truncate(len);
                   BigUint::from_bytes_be(&bytes) };
         // u1 = (zw) mod q
-        let u1 = (&z * &w) % &self.params.q;
+        let u1 = (&z * &w).mod_floor(&self.params.q);
         // u2 = (rw) mod q
-        let u2 = (&sig.r * &w) % &self.params.q;
+        let u2 = (&sig.r * &w).mod_floor(&self.params.q);
         // v = (((g)^u1(y)^u2) mod p) mod q
         let v_1 = self.params.g.modpow(&u1, &self.params.p);
-        let v_2 = self.params.g.modpow(&u2, &self.params.p);
-        let v = ((&v_1 * &v_2) % &self.params.p) % &self.params.q;
+        let v_2 = self.y.modpow(&u2, &self.params.p);
+        let v = (&v_1 * &v_2).mod_floor(&self.params.p).mod_floor(&self.params.q);
         // if v = r, then the signature is verified
         v == sig.r
     }
@@ -1056,6 +1054,8 @@ fn egcd(a: BigInt, b: BigInt) -> (BigInt, BigInt, BigInt) {
 #[cfg(test)]
 mod tests {
 //    use quickcheck::{Arbitrary,Gen};
+    use sha1::Sha1;
+    use sha2::{Sha224,Sha256,Sha384,Sha512};
     use super::*;
 
 //    const DSA_SIZES: [DSAParameterSize; 4] =
@@ -1072,7 +1072,7 @@ mod tests {
 
     const NUM_TESTS: u32 = 2;
 
-    #[test]
+    //#[test]
     fn shawe_taylor_works() {
         let mut rng = OsRng::new().unwrap();
         let params = DSAParameterSize::L1024N160;
@@ -1084,25 +1084,273 @@ mod tests {
         }
     }
 
-    #[test]
+    //#[test]
     fn pqg_generation_checks() {
         let mut rng = OsRng::new().unwrap();
         let params = DSAParameterSize::L1024N160;
 
         for _ in 0..NUM_TESTS {
             let seed = get_input_seed(&mut rng,params,n_bits(params)).unwrap();
-            println!("seed: {}", seed);
             let (p, q, ev) =
                 generate_provable_primes(&mut rng, &seed, params).unwrap();
-            println!("p: {}", p);
-            println!("q: {}", q);
             assert!(validate_provable_primes(&mut rng, &p, &q, &ev));
             let index = rng.gen::<u8>();
-            println!("index: {}", index);
             let g = generate_verifiable_generator(&p, &q, &ev, index).unwrap();
-            println!("g: {}", g);
             assert!(verify_generator(&p, &q, &ev, index, &g));
         }
+    }
+
+    fn get_first_k<H>(msg: &[u8], qlen: usize, q: &BigUint, x: &BigUint)
+        -> Vec<u8>
+      where
+        H: Clone + BlockInput + Input + FixedOutput + Default,
+        Hmac<H>: Clone,
+        H::BlockSize : ArrayLength<u8>
+    {
+        let mut hash = <H>::default();
+        hash.process(msg);
+        let h1 = hash.fixed_result().as_slice().to_vec();
+        let mut iter = KIterator::<H>::new(&h1, qlen, q, x);
+        let mut val = iter.next().unwrap();
+        val.to_bytes_be()
+    }
+
+    macro_rules! run_rfc6979_test {
+        ($hash: ty, $val: ident, $public: ident, $private: ident,
+         k $k: expr,
+         r $r: expr,
+         s $s: expr) => ({
+            let mut digest = <$hash>::default();
+            digest.process(&$val);
+            let h1 = digest.fixed_result().as_slice().to_vec();
+            let rbytes = $r;
+            let sbytes = $s;
+            let kbytes = $k;
+            let r = BigUint::from_bytes_be(&rbytes);
+            let s = BigUint::from_bytes_be(&sbytes);
+            let mut iter = KIterator::<$hash>::new(&h1,
+                                                   n_bits($public.params.size),
+                                                   &$public.params.q,
+                                                   &$private.x);
+            let k1 = iter.next().unwrap().to_bytes_be();
+            assert_eq!($k, k1);
+            let sig = $private.sign::<$hash>(&$val);
+            assert_eq!(sig.r, r);
+            assert_eq!(sig.s, s);
+            assert!($public.verify::<$hash>(&$val, &sig));
+        })
+    }
+
+    // these appendix_* tests are out of RFC6979
+    #[test]
+    fn appendix_a21() {
+        let pbytes = vec![0x86, 0xF5, 0xCA, 0x03, 0xDC, 0xFE, 0xB2, 0x25,
+                          0x06, 0x3F, 0xF8, 0x30, 0xA0, 0xC7, 0x69, 0xB9,
+                          0xDD, 0x9D, 0x61, 0x53, 0xAD, 0x91, 0xD7, 0xCE,
+                          0x27, 0xF7, 0x87, 0xC4, 0x32, 0x78, 0xB4, 0x47,
+                          0xE6, 0x53, 0x3B, 0x86, 0xB1, 0x8B, 0xED, 0x6E,
+                          0x8A, 0x48, 0xB7, 0x84, 0xA1, 0x4C, 0x25, 0x2C,
+                          0x5B, 0xE0, 0xDB, 0xF6, 0x0B, 0x86, 0xD6, 0x38,
+                          0x5B, 0xD2, 0xF1, 0x2F, 0xB7, 0x63, 0xED, 0x88,
+                          0x73, 0xAB, 0xFD, 0x3F, 0x5B, 0xA2, 0xE0, 0xA8,
+                          0xC0, 0xA5, 0x90, 0x82, 0xEA, 0xC0, 0x56, 0x93,
+                          0x5E, 0x52, 0x9D, 0xAF, 0x7C, 0x61, 0x04, 0x67,
+                          0x89, 0x9C, 0x77, 0xAD, 0xED, 0xFC, 0x84, 0x6C,
+                          0x88, 0x18, 0x70, 0xB7, 0xB1, 0x9B, 0x2B, 0x58,
+                          0xF9, 0xBE, 0x05, 0x21, 0xA1, 0x70, 0x02, 0xE3,
+                          0xBD, 0xD6, 0xB8, 0x66, 0x85, 0xEE, 0x90, 0xB3,
+                          0xD9, 0xA1, 0xB0, 0x2B, 0x78, 0x2B, 0x17, 0x79];
+        let qbytes = vec![0x99, 0x6F, 0x96, 0x7F, 0x6C, 0x8E, 0x38, 0x8D,
+                          0x9E, 0x28, 0xD0, 0x1E, 0x20, 0x5F, 0xBA, 0x95,
+                          0x7A, 0x56, 0x98, 0xB1];
+        let gbytes = vec![0x07, 0xB0, 0xF9, 0x25, 0x46, 0x15, 0x0B, 0x62,
+                          0x51, 0x4B, 0xB7, 0x71, 0xE2, 0xA0, 0xC0, 0xCE,
+                          0x38, 0x7F, 0x03, 0xBD, 0xA6, 0xC5, 0x6B, 0x50,
+                          0x52, 0x09, 0xFF, 0x25, 0xFD, 0x3C, 0x13, 0x3D,
+                          0x89, 0xBB, 0xCD, 0x97, 0xE9, 0x04, 0xE0, 0x91,
+                          0x14, 0xD9, 0xA7, 0xDE, 0xFD, 0xEA, 0xDF, 0xC9,
+                          0x07, 0x8E, 0xA5, 0x44, 0xD2, 0xE4, 0x01, 0xAE,
+                          0xEC, 0xC4, 0x0B, 0xB9, 0xFB, 0xBF, 0x78, 0xFD,
+                          0x87, 0x99, 0x5A, 0x10, 0xA1, 0xC2, 0x7C, 0xB7,
+                          0x78, 0x9B, 0x59, 0x4B, 0xA7, 0xEF, 0xB5, 0xC4,
+                          0x32, 0x6A, 0x9F, 0xE5, 0x9A, 0x07, 0x0E, 0x13,
+                          0x6D, 0xB7, 0x71, 0x75, 0x46, 0x4A, 0xDC, 0xA4,
+                          0x17, 0xBE, 0x5D, 0xCE, 0x2F, 0x40, 0xD1, 0x0A,
+                          0x46, 0xA3, 0xA3, 0x94, 0x3F, 0x26, 0xAB, 0x7F,
+                          0xD9, 0xC0, 0x39, 0x8F, 0xF8, 0xC7, 0x6E, 0xE0,
+                          0xA5, 0x68, 0x26, 0xA8, 0xA8, 0x8F, 0x1D, 0xBD];
+        let xbytes = vec![0x41, 0x16, 0x02, 0xCB, 0x19, 0xA6, 0xCC, 0xC3,
+                          0x44, 0x94, 0xD7, 0x9D, 0x98, 0xEF, 0x1E, 0x7E,
+                          0xD5, 0xAF, 0x25, 0xF7];
+        let ybytes = vec![0x5D, 0xF5, 0xE0, 0x1D, 0xED, 0x31, 0xD0, 0x29,
+                          0x7E, 0x27, 0x4E, 0x16, 0x91, 0xC1, 0x92, 0xFE,
+                          0x58, 0x68, 0xFE, 0xF9, 0xE1, 0x9A, 0x84, 0x77,
+                          0x64, 0x54, 0xB1, 0x00, 0xCF, 0x16, 0xF6, 0x53,
+                          0x92, 0x19, 0x5A, 0x38, 0xB9, 0x05, 0x23, 0xE2,
+                          0x54, 0x2E, 0xE6, 0x18, 0x71, 0xC0, 0x44, 0x0C,
+                          0xB8, 0x7C, 0x32, 0x2F, 0xC4, 0xB4, 0xD2, 0xEC,
+                          0x5E, 0x1E, 0x7E, 0xC7, 0x66, 0xE1, 0xBE, 0x8D,
+                          0x4C, 0xE9, 0x35, 0x43, 0x7D, 0xC1, 0x1C, 0x3C,
+                          0x8F, 0xD4, 0x26, 0x33, 0x89, 0x33, 0xEB, 0xFE,
+                          0x73, 0x9C, 0xB3, 0x46, 0x5F, 0x4D, 0x36, 0x68,
+                          0xC5, 0xE4, 0x73, 0x50, 0x82, 0x53, 0xB1, 0xE6,
+                          0x82, 0xF6, 0x5C, 0xBD, 0xC4, 0xFA, 0xE9, 0x3C,
+                          0x2E, 0xA2, 0x12, 0x39, 0x0E, 0x54, 0x90, 0x5A,
+                          0x86, 0xE2, 0x22, 0x31, 0x70, 0xB4, 0x4E, 0xAA,
+                          0x7D, 0xA5, 0xDD, 0x9F, 0xFC, 0xFB, 0x7F, 0x3B];
+        //
+        let p = BigUint::from_bytes_be(&pbytes);
+        let q = BigUint::from_bytes_be(&qbytes);
+        let g = BigUint::from_bytes_be(&gbytes);
+        let params = DSAParameters::new(p, g, q).unwrap();
+        let x = BigUint::from_bytes_be(&xbytes);
+        let y = BigUint::from_bytes_be(&ybytes);
+        let private = DSAPrivateKey::new(&params, x);
+        let public = DSAPublicKey::new(&params, y);
+        let size = DSAParameterSize::L1024N160;
+        //
+        let sample: [u8; 6] = [115, 97, 109, 112, 108, 101]; // "sample", ASCII
+        let test:   [u8; 4] = [116, 101, 115, 116]; // "test", ASCII
+        // With SHA-1, message = "sample":
+        //    k = 7BDB6B0FF756E1BB5D53583EF979082F9AD5BD5B
+        //    r = 2E1A0C2562B2912CAAF89186FB0F42001585DA55
+        //    s = 29EFB6B0AFF2D7A68EB70CA313022253B9A88DF5
+        run_rfc6979_test!(Sha1, sample, public, private,
+          k vec![0x7B, 0xDB, 0x6B, 0x0F, 0xF7, 0x56, 0xE1, 0xBB,
+                 0x5D, 0x53, 0x58, 0x3E, 0xF9, 0x79, 0x08, 0x2F,
+                 0x9A, 0xD5, 0xBD, 0x5B],
+          r vec![0x2E, 0x1A, 0x0C, 0x25, 0x62, 0xB2, 0x91, 0x2C,
+                 0xAA, 0xF8, 0x91, 0x86, 0xFB, 0x0F, 0x42, 0x00,
+                 0x15, 0x85, 0xDA, 0x55],
+          s vec![0x29, 0xEF, 0xB6, 0xB0, 0xAF, 0xF2, 0xD7, 0xA6,
+                 0x8E, 0xB7, 0x0C, 0xA3, 0x13, 0x02, 0x22, 0x53,
+                 0xB9, 0xA8, 0x8D, 0xF5]);
+        //  With SHA-224, message = "sample":
+        //     k = 562097C06782D60C3037BA7BE104774344687649
+        //     r = 4BC3B686AEA70145856814A6F1BB53346F02101E
+        //     s = 410697B92295D994D21EDD2F4ADA85566F6F94C1
+        run_rfc6979_test!(Sha224, sample, public, private,
+           k vec![0x56, 0x20, 0x97, 0xC0, 0x67, 0x82, 0xD6, 0x0C,
+                  0x30, 0x37, 0xBA, 0x7B, 0xE1, 0x04, 0x77, 0x43,
+                  0x44, 0x68, 0x76, 0x49],
+           r vec![0x4B, 0xC3, 0xB6, 0x86, 0xAE, 0xA7, 0x01, 0x45,
+                  0x85, 0x68, 0x14, 0xA6, 0xF1, 0xBB, 0x53, 0x34,
+                  0x6F, 0x02, 0x10, 0x1E],
+           s vec![0x41, 0x06, 0x97, 0xB9, 0x22, 0x95, 0xD9, 0x94,
+                  0xD2, 0x1E, 0xDD, 0x2F, 0x4A, 0xDA, 0x85, 0x56,
+                  0x6F, 0x6F, 0x94, 0xC1]);
+        // With SHA-256, message = "sample":
+        //    k = 519BA0546D0C39202A7D34D7DFA5E760B318BCFB
+        //    r = 81F2F5850BE5BC123C43F71A3033E9384611C545
+        //    s = 4CDD914B65EB6C66A8AAAD27299BEE6B035F5E89
+        run_rfc6979_test!(Sha256, sample, public, private,
+            k vec![0x51, 0x9B, 0xA0, 0x54, 0x6D, 0x0C, 0x39, 0x20,
+                   0x2A, 0x7D, 0x34, 0xD7, 0xDF, 0xA5, 0xE7, 0x60,
+                   0xB3, 0x18, 0xBC, 0xFB],
+            r vec![0x81, 0xF2, 0xF5, 0x85, 0x0B, 0xE5, 0xBC, 0x12,
+                   0x3C, 0x43, 0xF7, 0x1A, 0x30, 0x33, 0xE9, 0x38,
+                   0x46, 0x11, 0xC5, 0x45],
+            s vec![0x4C, 0xDD, 0x91, 0x4B, 0x65, 0xEB, 0x6C, 0x66,
+                   0xA8, 0xAA, 0xAD, 0x27, 0x29, 0x9B, 0xEE, 0x6B,
+                   0x03, 0x5F, 0x5E, 0x89]);
+        // With SHA-384, message = "sample":
+        //    k = 95897CD7BBB944AA932DBC579C1C09EB6FCFC595
+        //    r = 07F2108557EE0E3921BC1774F1CA9B410B4CE65A
+        //    s = 54DF70456C86FAC10FAB47C1949AB83F2C6F7595
+        run_rfc6979_test!(Sha384, sample, public, private,
+            k vec![0x95, 0x89, 0x7C, 0xD7, 0xBB, 0xB9, 0x44, 0xAA,
+                   0x93, 0x2D, 0xBC, 0x57, 0x9C, 0x1C, 0x09, 0xEB,
+                   0x6F, 0xCF, 0xC5, 0x95],
+            r vec![0x07, 0xF2, 0x10, 0x85, 0x57, 0xEE, 0x0E, 0x39,
+                   0x21, 0xBC, 0x17, 0x74, 0xF1, 0xCA, 0x9B, 0x41,
+                   0x0B, 0x4C, 0xE6, 0x5A],
+            s vec![0x54, 0xDF, 0x70, 0x45, 0x6C, 0x86, 0xFA, 0xC1,
+                   0x0F, 0xAB, 0x47, 0xC1, 0x94, 0x9A, 0xB8, 0x3F,
+                   0x2C, 0x6F, 0x75, 0x95]);
+        // With SHA-512, message = "sample":
+        //    k = 09ECE7CA27D0F5A4DD4E556C9DF1D21D28104F8B
+        //    r = 16C3491F9B8C3FBBDD5E7A7B667057F0D8EE8E1B
+        //    s = 02C36A127A7B89EDBB72E4FFBC71DABC7D4FC69C
+        run_rfc6979_test!(Sha512, sample, public, private,
+            k vec![0x09, 0xEC, 0xE7, 0xCA, 0x27, 0xD0, 0xF5, 0xA4,
+                   0xDD, 0x4E, 0x55, 0x6C, 0x9D, 0xF1, 0xD2, 0x1D,
+                   0x28, 0x10, 0x4F, 0x8B],
+            r vec![0x16, 0xC3, 0x49, 0x1F, 0x9B, 0x8C, 0x3F, 0xBB,
+                   0xDD, 0x5E, 0x7A, 0x7B, 0x66, 0x70, 0x57, 0xF0,
+                   0xD8, 0xEE, 0x8E, 0x1B],
+            s vec![0x02, 0xC3, 0x6A, 0x12, 0x7A, 0x7B, 0x89, 0xED,
+                   0xBB, 0x72, 0xE4, 0xFF, 0xBC, 0x71, 0xDA, 0xBC,
+                   0x7D, 0x4F, 0xC6, 0x9C]);
+        // With SHA-1, message = "test":
+        //    k = 5C842DF4F9E344EE09F056838B42C7A17F4A6433
+        //    r = 42AB2052FD43E123F0607F115052A67DCD9C5C77
+        //    s = 183916B0230D45B9931491D4C6B0BD2FB4AAF088
+        run_rfc6979_test!(Sha1, test, public, private,
+            k vec![0x5C, 0x84, 0x2D, 0xF4, 0xF9, 0xE3, 0x44, 0xEE,
+                   0x09, 0xF0, 0x56, 0x83, 0x8B, 0x42, 0xC7, 0xA1,
+                   0x7F, 0x4A, 0x64, 0x33],
+            r vec![0x42, 0xAB, 0x20, 0x52, 0xFD, 0x43, 0xE1, 0x23,
+                   0xF0, 0x60, 0x7F, 0x11, 0x50, 0x52, 0xA6, 0x7D,
+                   0xCD, 0x9C, 0x5C, 0x77],
+            s vec![0x18, 0x39, 0x16, 0xB0, 0x23, 0x0D, 0x45, 0xB9,
+                   0x93, 0x14, 0x91, 0xD4, 0xC6, 0xB0, 0xBD, 0x2F,
+                   0xB4, 0xAA, 0xF0, 0x88]);
+        // With SHA-224, message = "test":
+        //    k = 4598B8EFC1A53BC8AECD58D1ABBB0C0C71E67297
+        //    r = 6868E9964E36C1689F6037F91F28D5F2C30610F2
+        //    s = 49CEC3ACDC83018C5BD2674ECAAD35B8CD22940F
+        run_rfc6979_test!(Sha224, test, public, private,
+            k vec![0x45, 0x98, 0xB8, 0xEF, 0xC1, 0xA5, 0x3B, 0xC8,
+                   0xAE, 0xCD, 0x58, 0xD1, 0xAB, 0xBB, 0x0C, 0x0C,
+                   0x71, 0xE6, 0x72, 0x97],
+            r vec![0x68, 0x68, 0xE9, 0x96, 0x4E, 0x36, 0xC1, 0x68,
+                   0x9F, 0x60, 0x37, 0xF9, 0x1F, 0x28, 0xD5, 0xF2,
+                   0xC3, 0x06, 0x10, 0xF2],
+            s vec![0x49, 0xCE, 0xC3, 0xAC, 0xDC, 0x83, 0x01, 0x8C,
+                   0x5B, 0xD2, 0x67, 0x4E, 0xCA, 0xAD, 0x35, 0xB8,
+                   0xCD, 0x22, 0x94, 0x0F]);
+        // With SHA-256, message = "test":
+        //    k = 5A67592E8128E03A417B0484410FB72C0B630E1A
+        //    r = 22518C127299B0F6FDC9872B282B9E70D0790812
+        //    s = 6837EC18F150D55DE95B5E29BE7AF5D01E4FE160
+        run_rfc6979_test!(Sha256, test, public, private,
+            k vec![0x5A, 0x67, 0x59, 0x2E, 0x81, 0x28, 0xE0, 0x3A,
+                   0x41, 0x7B, 0x04, 0x84, 0x41, 0x0F, 0xB7, 0x2C,
+                   0x0B, 0x63, 0x0E, 0x1A],
+            r vec![0x22, 0x51, 0x8C, 0x12, 0x72, 0x99, 0xB0, 0xF6,
+                   0xFD, 0xC9, 0x87, 0x2B, 0x28, 0x2B, 0x9E, 0x70,
+                   0xD0, 0x79, 0x08, 0x12],
+            s vec![0x68, 0x37, 0xEC, 0x18, 0xF1, 0x50, 0xD5, 0x5D,
+                   0xE9, 0x5B, 0x5E, 0x29, 0xBE, 0x7A, 0xF5, 0xD0,
+                   0x1E, 0x4F, 0xE1, 0x60]);
+        // With SHA-384, message = "test":
+        //    k = 220156B761F6CA5E6C9F1B9CF9C24BE25F98CD89
+        //    r = 854CF929B58D73C3CBFDC421E8D5430CD6DB5E66
+        //    s = 91D0E0F53E22F898D158380676A871A157CDA622
+        run_rfc6979_test!(Sha384, test, public, private,
+            k vec![0x22, 0x01, 0x56, 0xB7, 0x61, 0xF6, 0xCA, 0x5E,
+                   0x6C, 0x9F, 0x1B, 0x9C, 0xF9, 0xC2, 0x4B, 0xE2,
+                   0x5F, 0x98, 0xCD, 0x89],
+            r vec![0x85, 0x4C, 0xF9, 0x29, 0xB5, 0x8D, 0x73, 0xC3,
+                   0xCB, 0xFD, 0xC4, 0x21, 0xE8, 0xD5, 0x43, 0x0C,
+                   0xD6, 0xDB, 0x5E, 0x66],
+            s vec![0x91, 0xD0, 0xE0, 0xF5, 0x3E, 0x22, 0xF8, 0x98,
+                   0xD1, 0x58, 0x38, 0x06, 0x76, 0xA8, 0x71, 0xA1,
+                   0x57, 0xCD, 0xA6, 0x22]);
+        // With SHA-512, message = "test":
+        //    k = 65D2C2EEB175E370F28C75BFCDC028D22C7DBE9C
+        //    r = 8EA47E475BA8AC6F2D821DA3BD212D11A3DEB9A0
+        //    s = 7C670C7AD72B6C050C109E1790008097125433E8
+        run_rfc6979_test!(Sha512, test, public, private,
+            k vec![0x65, 0xD2, 0xC2, 0xEE, 0xB1, 0x75, 0xE3, 0x70,
+                   0xF2, 0x8C, 0x75, 0xBF, 0xCD, 0xC0, 0x28, 0xD2,
+                   0x2C, 0x7D, 0xBE, 0x9C],
+            r vec![0x8E, 0xA4, 0x7E, 0x47, 0x5B, 0xA8, 0xAC, 0x6F,
+                   0x2D, 0x82, 0x1D, 0xA3, 0xBD, 0x21, 0x2D, 0x11,
+                   0xA3, 0xDE, 0xB9, 0xA0],
+            s vec![0x7C, 0x67, 0x0C, 0x7A, 0xD7, 0x2B, 0x6C, 0x05,
+                   0x0C, 0x10, 0x9E, 0x17, 0x90, 0x00, 0x80, 0x97,
+                   0x12, 0x54, 0x33, 0xE8]);
     }
 
 }

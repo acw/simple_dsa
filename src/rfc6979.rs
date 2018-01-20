@@ -157,7 +157,7 @@ impl<H> Iterator for KIterator<H>
     }
 }
 
-fn bits2int(x: &[u8], q: &BigUint, qlen: usize) -> BigUint {
+pub fn bits2int(x: &[u8], q: &BigUint, qlen: usize) -> BigUint {
     let mut value = BigUint::from_bytes_be(x);
     let vlen = x.len() * 8;
 
