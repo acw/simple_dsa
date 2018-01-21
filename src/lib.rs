@@ -132,41 +132,30 @@ impl DSAParameters {
 
     /// Using the given p and q values and an index, create a new DSAParameters
     /// by creating a new generator g that works with p and q.
-    pub fn generate_g(ps: DSAParameterSize,
-                      p: BigUint, q: BigUint,
-                      ev: DSAGenEvidence,
-                      idx: u8)
+    fn generate_g(ps: DSAParameterSize,
+                  p: BigUint, q: BigUint,
+                  ev: DSAGenEvidence,
+                  idx: u8)
         -> Result<DSAParameters, DSAGenError>
     {
         let g = generate_verifiable_generator(&p, &q, &ev, idx)?;
         Ok(DSAParameters{ size: ps, p: p, q: q, g: g })
     }
 
-    /// Given the set of inputs you used to generate your system, verify that
-    /// everything makes sense.
-    pub fn verify_g(p: &BigUint, g: &BigUint, q: &BigUint,
-                    ev: &DSAGenEvidence, idx: u8)
-        -> bool
-    {
-        verify_generator(p, q, ev, idx, g)
-    }
-
     /// Given the provided evidence, validate that the domain parameters
     /// were appropriately constructed.
-    pub fn validate(&self, evidence: &DSAGenEvidence)
-        -> bool
-    {
+    pub fn verify(&self, ev: &DSAGenEvidence, idx: u8) -> bool {
         let mut rng = OsRng::new().unwrap();
-        self.validate_w_rng(&mut rng, evidence)
+        self.verify_w_rng(&mut rng, ev, idx)
     }
 
-    /// Given the provided evidence, validate that the domain parameters
-    /// were appropriately constructed, using the given random number
-    /// generator.
-    pub fn validate_w_rng<G: Rng>(&self, rng: &mut G, evidence: &DSAGenEvidence)
+    /// Given the set of inputs you used to generate your system, verify that
+    /// everything makes sense.
+    pub fn verify_w_rng<G: Rng>(&self, r: &mut G, ev: &DSAGenEvidence, idx: u8)
         -> bool
     {
-        validate_provable_primes(rng, &self.p, &self.q, evidence)
+        validate_provable_primes(r, &self.p, &self.q, ev) &&
+        verify_generator(&self.p, &self.q, ev, idx, &self.g)
     }
 }
 
