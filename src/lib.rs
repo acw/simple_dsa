@@ -27,7 +27,8 @@ use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
 use rfc6979::{KIterator,bits2int};
 use sha2::Sha256;
-use simple_asn1::{ASN1DecodeErr};
+use simple_asn1::{ASN1Block,ASN1Class,ASN1DecodeErr,ASN1EncodeErr,
+                  FromASN1, ToASN1};
 use std::clone::Clone;
 use std::cmp::min;
 use std::io;
@@ -923,6 +924,18 @@ impl DSAPublicKey {
     }
 }
 
+impl ToASN1 for DSAPublicKey {
+    type Error = ASN1EncodeErr;
+
+    fn to_asn1_class(&self, c: ASN1Class)
+        -> Result<Vec<ASN1Block>,ASN1EncodeErr>
+    {
+        let inty = BigInt::from(self.y.clone());
+        let yblock = ASN1Block::Integer(c, 0, inty);
+        Ok(vec![yblock])
+    }
+}
+
 /// A DSA Signature
 #[derive(Clone,Debug,PartialEq)]
 pub struct DSASignature {
@@ -930,6 +943,58 @@ pub struct DSASignature {
     s: BigUint
 }
 
+#[derive(Clone,Debug,PartialEq)]
+pub enum DSADecodeError {
+    ASN1Error(ASN1DecodeErr),
+    NoSignatureFound,
+    NegativeSigValues
+}
+
+impl From<ASN1DecodeErr> for DSADecodeError {
+    fn from(a: ASN1DecodeErr) -> DSADecodeError {
+        DSADecodeError::ASN1Error(a)
+    }
+}
+
+impl FromASN1 for DSASignature {
+    type Error = DSADecodeError;
+
+    fn from_asn1(v: &[ASN1Block])
+        -> Result<(DSASignature,&[ASN1Block]),DSADecodeError>
+    {
+        match v.split_first() {
+            Some((&ASN1Block::Sequence(_,_,ref info), rest))
+                if info.len() == 2 =>
+            {
+                match (&info[0], &info[1]) {
+                    (&ASN1Block::Integer(_,_,ref rint),
+                     &ASN1Block::Integer(_,_,ref sint)) => {
+                        match (rint.to_biguint(), sint.to_biguint()) {
+                            (Some(r), Some(s)) =>
+                                Ok((DSASignature{ r: r, s: s }, rest)),
+                            _  =>
+                                Err(DSADecodeError::NegativeSigValues)
+                        }
+                    }
+                    _ => Err(DSADecodeError::NoSignatureFound)
+                }
+            }
+            _ => Err(DSADecodeError::NoSignatureFound)
+        }
+    }
+}
+
+impl ToASN1 for DSASignature {
+    type Error = ASN1EncodeErr;
+
+    fn to_asn1_class(&self, c: ASN1Class)
+        -> Result<Vec<ASN1Block>,ASN1EncodeErr>
+    {
+        let rb = ASN1Block::Integer(c, 0, BigInt::from(self.r.clone()));
+        let sb = ASN1Block::Integer(c, 0, BigInt::from(self.s.clone()));
+        Ok(vec![ASN1Block::Sequence(c, 0, vec![rb,sb])])
+    }
+}
 
 // fast modular inverse
 pub fn modinv(e: &BigUint, phi: &BigUint) -> BigUint {
@@ -985,6 +1050,7 @@ fn egcd(a: BigInt, b: BigInt) -> (BigInt, BigInt, BigInt) {
 mod tests {
     use sha1::Sha1;
     use sha2::{Sha224,Sha256,Sha384,Sha512};
+    use simple_asn1::{der_decode,der_encode};
     use super::*;
 
     const NUM_TESTS: u32 = 2;
@@ -1107,6 +1173,9 @@ mod tests {
             assert_eq!(sig.r, r);
             assert_eq!(sig.s, s);
             assert!($public.verify::<$hash>(&$val, &sig));
+            let blocks = der_encode(&sig).unwrap();
+            let sig2 = der_decode(&blocks).unwrap();
+            assert_eq!(sig, sig2);
         })
     }
 
