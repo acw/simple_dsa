@@ -796,7 +796,7 @@ impl DSAKeyPair {
 /// A DSA key pair
 #[derive(Clone,Debug,PartialEq)]
 pub struct DSAPrivateKey {
-    params: DSAParameters,
+    pub params: DSAParameters,
     x: BigUint
 }
 
@@ -875,7 +875,7 @@ impl DSAPrivateKey {
 /// A DSA key pair
 #[derive(Clone,Debug,PartialEq)]
 pub struct DSAPublicKey {
-    params: DSAParameters,
+    pub params: DSAParameters,
     y: BigUint
 }
 
