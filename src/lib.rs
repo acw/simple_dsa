@@ -16,23 +16,26 @@ extern crate sha1;
 extern crate sha2;
 extern crate simple_asn1;
 
+mod ecc;
+mod math;
 mod rfc6979;
 
 use digest::{BlockInput,FixedOutput,Input};
 use digest::generic_array::ArrayLength;
 use hmac::Hmac;
-use num::{BigInt,BigUint,Integer,One,Signed,Zero};
-use num::bigint::Sign;
+use math::modinv;
+use num::{BigInt,BigUint,Integer,One,Zero};
 use num::cast::FromPrimitive;
 use rand::{Rng,OsRng};
-use rfc6979::{KIterator,bits2int};
+use rfc6979::{DSASignature,KIterator,bits2int};
 use sha2::Sha256;
-use simple_asn1::{ASN1Block,ASN1Class,ASN1DecodeErr,ASN1EncodeErr,
-                  FromASN1, ToASN1};
+use simple_asn1::{ASN1Block,ASN1Class,ASN1DecodeErr,ASN1EncodeErr,ToASN1};
 use std::clone::Clone;
 use std::cmp::min;
 use std::io;
-use std::ops::{Add,Div,Neg,Sub};
+use std::ops::{Add,Div,Sub};
+
+pub use ecc::{ECCKeyPair,EllipticCurve};
 
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum DSAParameterSize { L1024N160, L2048N224, L2048N256, L3072N256 }
@@ -934,115 +937,6 @@ impl ToASN1 for DSAPublicKey {
         let yblock = ASN1Block::Integer(c, 0, inty);
         Ok(vec![yblock])
     }
-}
-
-/// A DSA Signature
-#[derive(Clone,Debug,PartialEq)]
-pub struct DSASignature {
-    r: BigUint,
-    s: BigUint
-}
-
-#[derive(Clone,Debug,PartialEq)]
-pub enum DSADecodeError {
-    ASN1Error(ASN1DecodeErr),
-    NoSignatureFound,
-    NegativeSigValues
-}
-
-impl From<ASN1DecodeErr> for DSADecodeError {
-    fn from(a: ASN1DecodeErr) -> DSADecodeError {
-        DSADecodeError::ASN1Error(a)
-    }
-}
-
-impl FromASN1 for DSASignature {
-    type Error = DSADecodeError;
-
-    fn from_asn1(v: &[ASN1Block])
-        -> Result<(DSASignature,&[ASN1Block]),DSADecodeError>
-    {
-        match v.split_first() {
-            Some((&ASN1Block::Sequence(_,_,ref info), rest))
-                if info.len() == 2 =>
-            {
-                match (&info[0], &info[1]) {
-                    (&ASN1Block::Integer(_,_,ref rint),
-                     &ASN1Block::Integer(_,_,ref sint)) => {
-                        match (rint.to_biguint(), sint.to_biguint()) {
-                            (Some(r), Some(s)) =>
-                                Ok((DSASignature{ r: r, s: s }, rest)),
-                            _  =>
-                                Err(DSADecodeError::NegativeSigValues)
-                        }
-                    }
-                    _ => Err(DSADecodeError::NoSignatureFound)
-                }
-            }
-            _ => Err(DSADecodeError::NoSignatureFound)
-        }
-    }
-}
-
-impl ToASN1 for DSASignature {
-    type Error = ASN1EncodeErr;
-
-    fn to_asn1_class(&self, c: ASN1Class)
-        -> Result<Vec<ASN1Block>,ASN1EncodeErr>
-    {
-        let rb = ASN1Block::Integer(c, 0, BigInt::from(self.r.clone()));
-        let sb = ASN1Block::Integer(c, 0, BigInt::from(self.s.clone()));
-        Ok(vec![ASN1Block::Sequence(c, 0, vec![rb,sb])])
-    }
-}
-
-// fast modular inverse
-pub fn modinv(e: &BigUint, phi: &BigUint) -> BigUint {
-    let (_, mut x, _) = extended_euclidean(&e, &phi);
-    let int_phi = BigInt::from_biguint(Sign::Plus, phi.clone());
-    while x.is_negative() {
-        x = x + &int_phi;
-    }
-    x.to_biguint().unwrap()
-}
-
-fn extended_euclidean(a: &BigUint, b: &BigUint) -> (BigInt, BigInt, BigInt) {
-    let pos_int_a = BigInt::from_biguint(Sign::Plus, a.clone());
-    let pos_int_b = BigInt::from_biguint(Sign::Plus, b.clone());
-    let (d, x, y) = egcd(pos_int_a, pos_int_b);
-
-    if d.is_negative() {
-        (d.neg(), x.neg(), y.neg())
-    } else {
-        (d, x, y)
-    }
-}
-
-fn egcd(a: BigInt, b: BigInt) -> (BigInt, BigInt, BigInt) {
-    let mut s: BigInt = Zero::zero();
-    let mut old_s     = One::one();
-    let mut t: BigInt = One::one();
-    let mut old_t     = Zero::zero();
-    let mut r         = b.clone();
-    let mut old_r     = a.clone();
-
-    while !r.is_zero() {
-        let quotient = old_r.clone() / r.clone();
-
-        let prov_r = r.clone();
-        let prov_s = s.clone();
-        let prov_t = t.clone();
-
-        r = old_r - (r * &quotient);
-        s = old_s - (s * &quotient);
-        t = old_t - (t * &quotient);
-
-        old_r = prov_r;
-        old_s = prov_s;
-        old_t = prov_t;
-    }
-
-    (old_r, old_s, old_t)
 }
 
 
