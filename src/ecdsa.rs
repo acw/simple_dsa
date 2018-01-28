@@ -23,7 +23,7 @@ pub struct EllipticCurve {
 
 impl EllipticCurve {
     /// Create a new elliptic curve structure that represents NIST's
-    /// p192 curve.
+    /// p192 curve. (secp192r1)
     pub fn p192() -> EllipticCurve {
         EllipticCurve {
             p:      BigUint::from_bytes_be(&vec![
@@ -62,7 +62,7 @@ impl EllipticCurve {
     }
 
     /// Create a new elliptic curve structure that represents NIST's
-    /// p224 curve.
+    /// p224 curve. (secp224r1)
     pub fn p224() -> EllipticCurve {
         EllipticCurve {
             p:      BigUint::from_bytes_be(&vec![
@@ -108,7 +108,7 @@ impl EllipticCurve {
     }
 
     /// Create a new elliptic curve structure that represents NIST's
-    /// p256 curve.
+    /// p256 curve. (secp256r1)
     pub fn p256() -> EllipticCurve {
         EllipticCurve {
             p:      BigUint::from_bytes_be(&vec![
@@ -154,7 +154,7 @@ impl EllipticCurve {
     }
 
     /// Create a new elliptic curve structure that represents NIST's
-    /// p256 curve.
+    /// p384 curve. (secp384r1)
     pub fn p384() -> EllipticCurve {
         EllipticCurve {
             p:      BigUint::from_bytes_be(&vec![
@@ -214,7 +214,7 @@ impl EllipticCurve {
     }
 
     /// Create a new elliptic curve structure that represents NIST's
-    /// p256 curve.
+    /// p521 curve. (secp521r1)
     pub fn p521() -> EllipticCurve {
         EllipticCurve {
             p:      BigUint::from_bytes_be(&vec![
@@ -304,6 +304,7 @@ pub struct ECCPoint {
 }
 
 impl ECCPoint {
+    /// Generate the default point G for the given elliptic curve.
     pub fn default(ec: &EllipticCurve) -> ECCPoint {
         ECCPoint {
             curve: ec.clone(),
@@ -312,6 +313,7 @@ impl ECCPoint {
         }
     }
 
+    /// Double the given point along the curve.
     pub fn double(&self) -> ECCPoint {
         let ua = BigInt::from_biguint(Sign::Plus, self.curve.a.clone());
         let up = BigInt::from_biguint(Sign::Plus, self.curve.p.clone());
@@ -332,6 +334,7 @@ impl ECCPoint {
         ECCPoint{ curve: self.curve.clone(), x: xr, y: yr }
     }
 
+    /// Add this point to another point, returning the new point.
     pub fn add(&self, other: &ECCPoint) -> ECCPoint {
         assert!(self.curve == other.curve);
         let xdiff = &self.x - &other.x;
@@ -343,6 +346,7 @@ impl ECCPoint {
         ECCPoint{ curve: self.curve.clone(), x: xr, y: yr }
     }
 
+    /// Scale this point by the given factor.
     pub fn scale(&self, d: &BigUint) -> ECCPoint {
         assert!(!d.is_zero());
         let one: BigUint = One::one();
@@ -373,6 +377,8 @@ pub struct ECCKeyPair {
 }
 
 impl ECCKeyPair {
+    /// Generate new key pair against the given curve. This uses `OsRng` under
+    /// the hood, which is supposed to be pretty good.
     pub fn generate(params: &EllipticCurve)
         -> ECCKeyPair
     {
@@ -381,6 +387,8 @@ impl ECCKeyPair {
 
     }
 
+    /// Generate a new key pair, but use the given RNG. You should pick a
+    /// good one.
     pub fn generate_w_rng<G: Rng>(rng: &mut G, params: &EllipticCurve)
         -> ECCKeyPair
     {
@@ -417,6 +425,7 @@ pub struct ECCPrivateKey {
 }
 
 impl ECCPrivateKey {
+    /// Instantiate a private key against the given curve and value.
     pub fn new(c: &EllipticCurve, d: &BigUint) -> ECCPrivateKey {
         ECCPrivateKey {
             curve: c.clone(),
@@ -424,6 +433,9 @@ impl ECCPrivateKey {
         }
     }
 
+    /// Sign a message. This uses the deterministic k-generation algorithm
+    /// described in RFC 6979, so should be fairly robust against collisions
+    /// in k, even without the use of a random number source.
     pub fn sign<Hash>(&self, m: &[u8]) -> DSASignature
       where
         Hash: Clone + BlockInput + Input + FixedOutput + Default,
@@ -504,6 +516,7 @@ pub struct ECCPublicKey {
 }
 
 impl ECCPublicKey {
+    /// Instantiate the given public key.
     pub fn new(curve: &EllipticCurve, point: &ECCPoint) -> ECCPublicKey {
         ECCPublicKey {
             curve: curve.clone(),
@@ -511,6 +524,8 @@ impl ECCPublicKey {
         }
     }
 
+    /// Verify a signature of a message, using the associated hash function
+    /// for this message.
     pub fn verify<Hash>(&self, m: &[u8], sig: &DSASignature) -> bool
       where Hash: Clone + Default + Input + FixedOutput
     {
