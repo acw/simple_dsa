@@ -14,6 +14,7 @@ extern crate num;
 extern crate rand;
 extern crate sha1;
 extern crate sha2;
+#[macro_use]
 extern crate simple_asn1;
 
 pub mod dsa;

@@ -7,6 +7,8 @@ use num::bigint::Sign;
 use rand::{Rng,OsRng};
 use rfc6979::{KIterator,bits2int};
 use sig::DSASignature;
+use simple_asn1::{ASN1Block,ASN1Class,ASN1DecodeErr,ASN1EncodeErr,
+                  FromASN1,OID,ToASN1};
 use std::cmp::min;
 
 #[allow(non_snake_case)]
@@ -296,6 +298,88 @@ impl EllipticCurve {
     }
 }
 
+#[derive(Debug)]
+pub enum ECDSAError {
+    ASN1DecodeErr(ASN1DecodeErr),
+    ASN1EncodeErr(ASN1EncodeErr),
+    UnrecognizedCurve
+}
+
+impl From<ASN1DecodeErr> for ECDSAError {
+    fn from(e: ASN1DecodeErr) -> ECDSAError {
+        ECDSAError::ASN1DecodeErr(e)
+    }
+}
+
+impl From<ASN1EncodeErr> for ECDSAError {
+    fn from(e: ASN1EncodeErr) -> ECDSAError {
+        ECDSAError::ASN1EncodeErr(e)
+    }
+}
+
+impl FromASN1 for EllipticCurve {
+    type Error = ECDSAError;
+
+    fn from_asn1(b: &[ASN1Block])
+        -> Result<(EllipticCurve, &[ASN1Block]),ECDSAError>
+    {
+        match b.split_first() {
+            None =>
+                Err(ECDSAError::from(ASN1DecodeErr::EmptyBuffer)),
+            Some((&ASN1Block::ObjectIdentifier(_, _, ref oid), rest)) => {
+                if oid == oid!(1,2,840,10045,3,1,1,1) {
+                    return Ok((EllipticCurve::p192(), rest))
+                }
+                if oid == oid!(1,3,132,0,33) {
+                    return Ok((EllipticCurve::p224(), rest))
+                }
+                if oid == oid!(1,2,840,10045,3,1,1,7) {
+                    return Ok((EllipticCurve::p256(), rest))
+                }
+                if oid == oid!(1,3,132,0,34) {
+                    return Ok((EllipticCurve::p384(), rest))
+                }
+                if oid == oid!(1,3,132,0,35) {
+                    return Ok((EllipticCurve::p521(), rest))
+                }
+                Err(ECDSAError::UnrecognizedCurve)
+            }
+            Some(_) =>
+                Err(ECDSAError::UnrecognizedCurve)
+        }
+    }
+}
+
+impl ToASN1 for EllipticCurve {
+    type Error = ECDSAError;
+
+    fn to_asn1_class(&self, c: ASN1Class)
+        -> Result<Vec<ASN1Block>, ECDSAError>
+    {
+        if self == &EllipticCurve::p192() {
+            let oid = oid!(1,2,840,10045,3,1,1,1);
+            return Ok(vec![ASN1Block::ObjectIdentifier(c, 0, oid)]);
+        }
+        if self == &EllipticCurve::p224() {
+            let oid = oid!(1,3,132,0,33);
+            return Ok(vec![ASN1Block::ObjectIdentifier(c, 0, oid)]);
+        }
+        if self == &EllipticCurve::p256() {
+            let oid = oid!(1,2,840,10045,3,1,1,7);
+            return Ok(vec![ASN1Block::ObjectIdentifier(c, 0, oid)]);
+        }
+        if self == &EllipticCurve::p384() {
+            let oid = oid!(1,3,132,0,34);
+            return Ok(vec![ASN1Block::ObjectIdentifier(c, 0, oid)]);
+        }
+        if self == &EllipticCurve::p521() {
+            let oid = oid!(1,3,132,0,35);
+            return Ok(vec![ASN1Block::ObjectIdentifier(c, 0, oid)]);
+        }
+        return Err(ECDSAError::UnrecognizedCurve)
+    }
+}
+
 #[allow(non_snake_case)]
 #[derive(Clone,Debug,PartialEq)]
 pub struct ECCPoint {
@@ -421,7 +505,7 @@ impl ECCKeyPair {
 
 #[derive(Clone,Debug,PartialEq)]
 pub struct ECCPrivateKey {
-    curve: EllipticCurve,
+    pub curve: EllipticCurve,
     d: BigUint
 }
 
@@ -512,7 +596,7 @@ impl ECCPrivateKey {
 #[allow(non_snake_case)]
 #[derive(Clone,Debug,PartialEq)]
 pub struct ECCPublicKey {
-    curve: EllipticCurve,
+    pub curve: EllipticCurve,
     Q: ECCPoint
 }
 
@@ -640,5 +724,20 @@ mod tests {
             let sig = pair.private.sign::<Sha256>(&msg);
             assert!(pair.public.verify::<Sha256>(&msg, &sig));
         }
+    }
+
+    fn id_check(curve: EllipticCurve) {
+        let blocks = curve.to_asn1().unwrap();
+        let (res, _) = EllipticCurve::from_asn1(&blocks).unwrap();
+        assert_eq!(curve, res);
+    }
+
+    #[test]
+    fn curve_ids_right() {
+        id_check(EllipticCurve::p192());
+        id_check(EllipticCurve::p224());
+        id_check(EllipticCurve::p256());
+        id_check(EllipticCurve::p384());
+        id_check(EllipticCurve::p521());
     }
 }
