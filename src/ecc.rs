@@ -6,6 +6,7 @@ use num::{BigInt,BigUint,Integer,One,Signed,Zero};
 use num::bigint::Sign;
 use rand::{Rng,OsRng};
 use rfc6979::{DSASignature,KIterator,bits2int};
+use std::cmp::min;
 
 #[allow(non_snake_case)]
 #[derive(Clone,Debug,PartialEq)]
@@ -429,6 +430,7 @@ impl ECCPrivateKey {
         Hmac<Hash>: Clone,
         Hash::BlockSize: ArrayLength<u8>
     {
+        let q = self.curve.n.clone();
         // This algorithm is per RFC 6979, which has a nice, relatively
         // straightforward description of how to do DSA signing.
         //
@@ -449,7 +451,7 @@ impl ECCPrivateKey {
                                 .map(|x| *x)
                                 .collect();
         let h0 = bits2int(&h1, n);
-        let h = h0.mod_floor(&self.curve.n);
+        let h = h0.mod_floor(&q);
 
         // 2.  A random value modulo q, dubbed k, is generated.  That value
         //     shall not be 0; hence, it lies in the [1, q-1] range.  Most
@@ -461,14 +463,16 @@ impl ECCPrivateKey {
             // 3. A value r (modulo q) is computed from k and the key
             //    parameters:
             //     *  For DSA ...
-            //     *  For ECDSA ...
+            //     *  For ECDSA: the point kG is computed; its X coordinate (a
+            //        member of the field over which E is defined) is converted
+            //        to an integer, which is reduced modulo q, yielding r.
             //
             //    If r turns out to be zero, a new k should be selected and r
             //    computed again (this is an utterly improbable occurrence).
             let g = ECCPoint::default(&self.curve);
             let kg = g.scale(&k);
-            let ni = BigInt::from_biguint(Sign::Plus, self.curve.n.clone());
-            let r = kg.x.mod_floor(&ni);
+            let qi = BigInt::from_biguint(Sign::Plus, self.curve.n.clone());
+            let r = kg.x.mod_floor(&qi);
             if r.is_zero() {
                 continue;
             }
@@ -477,12 +481,16 @@ impl ECCPrivateKey {
             //           s = (h+x*r)/k mod q
             //
             //     The pair (r, s) is the signature.
-            // let kinv = unimplemented!(); modinv(&k, &self.params.q);
-            let s = unimplemented!(); //((&h + (&self.x * &r)) * &kinv) % &self.params.q;
+            let kinv = BigInt::from_biguint(Sign::Plus, modinv(&k, &q));
+            let di = BigInt::from_biguint(Sign::Plus, self.d.clone());
+            let hi = BigInt::from_biguint(Sign::Plus, h);
+            let s = ((&hi + (&di * &r)) * &kinv) % &qi;
 
             assert!(r.is_positive());
+            assert!(s.is_positive());
             let ru = r.to_biguint().unwrap();
-            return DSASignature{ r: ru, s: s };
+            let su = s.to_biguint().unwrap();
+            return DSASignature{ r: ru, s: su };
         }
         panic!("The world is broken; couldn't find a k in sign().");
     }
@@ -495,9 +503,63 @@ pub struct ECCPublicKey {
     Q: ECCPoint
 }
 
+impl ECCPublicKey {
+    pub fn new(curve: &EllipticCurve, point: &ECCPoint) -> ECCPublicKey {
+        ECCPublicKey {
+            curve: curve.clone(),
+            Q: point.clone()
+        }
+    }
+
+    pub fn verify<Hash>(&self, m: &[u8], sig: &DSASignature) -> bool
+      where Hash: Clone + Default + Input + FixedOutput
+    {
+        // (from wikipedia, of all places)
+        // 1. Verify that r and s are integers in [1,n-1]. If not, the
+        //    signature is invalid.
+        if sig.r >= self.curve.n {
+            return false;
+        }
+        if sig.s >= self.curve.n {
+            return false;
+        }
+        // 2. Calculate e = HASH(m), where HASH is the same function used
+        //    in the signature generation.
+        // 3. Let z be the L_n leftmost bits of e.
+        let mut digest = <Hash>::default();
+        digest.process(m);
+        let z = { let mut bytes: Vec<u8> = digest.fixed_result()
+                                                 .as_slice()
+                                                 .iter()
+                                                 .map(|x| *x)
+                                                 .collect();
+                  let n = self.curve.n.bits();
+                  let len = min(n, bytes.len());
+                  bytes.truncate(len);
+                  BigUint::from_bytes_be(&bytes) };
+        // 4. Calculate w = (s)^-1 mod n;
+        let w = modinv(&sig.s, &self.curve.n);
+        // 5. Calculate u1 = zw mod n and u2 = rw mod n
+        let u1 = (&z * &w).mod_floor(&self.curve.n);
+        let u2 = (&sig.r * &w).mod_floor(&self.curve.n);
+        // 6. Calculate the curve point (x1, y1) = u1 * G + u2 * Qa. If
+        // (x1, y1) = O then the signature is invalid.
+        let curve_g = ECCPoint::default(&self.curve);
+        let v = curve_g.scale(&u1).add(&self.Q.scale(&u2));
+        // if v = r, then the signature is verified
+        match v.x.to_biguint() {
+            None => false,
+            Some(vu) => vu == sig.r
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use sha2::{Sha256};
     use super::*;
+
+    const NUM_TESTS: usize = 20;
 
     #[test]
     fn p256_double() {
@@ -551,5 +613,16 @@ mod tests {
         let res = base.scale(&BigUint::from(9 as u64));
         let goal = ECCPoint{ curve: base.curve.clone(), x: x, y: y };
         assert_eq!(res, goal);
+    }
+
+    #[test]
+    fn p256_sign_verify() {
+        for _ in 0..NUM_TESTS {
+            let curve = EllipticCurve::p256();
+            let pair = ECCKeyPair::generate(&curve);
+            let msg = vec![0,0,1,2,3,4,5,0,0];
+            let sig = pair.private.sign::<Sha256>(&msg);
+            assert!(pair.public.verify::<Sha256>(&msg, &sig));
+        }
     }
 }
