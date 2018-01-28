@@ -5,7 +5,8 @@ use math::{divmod,modinv};
 use num::{BigInt,BigUint,Integer,One,Signed,Zero};
 use num::bigint::Sign;
 use rand::{Rng,OsRng};
-use rfc6979::{DSASignature,KIterator,bits2int};
+use rfc6979::{KIterator,bits2int};
+use sig::DSASignature;
 use std::cmp::min;
 
 #[allow(non_snake_case)]

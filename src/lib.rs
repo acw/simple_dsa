@@ -20,5 +20,6 @@ pub mod dsa;
 pub mod ecdsa;
 mod math;
 mod rfc6979;
+mod sig;
 
-
+pub use sig::*;
