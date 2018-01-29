@@ -383,18 +383,18 @@ impl ToASN1 for EllipticCurve {
 
 #[allow(non_snake_case)]
 #[derive(Clone,Debug,PartialEq)]
-pub struct ECCPoint {
+pub struct ECDSAPoint {
     pub curve: EllipticCurve,
     pub x: BigInt,
     pub y: BigInt
 }
 
-impl ECCPoint {
+impl ECDSAPoint {
     /// Generate the provided point on the given curve. This function returns
     /// a `Result` because it will validate that the point created is actually
     /// on the curve.
     pub fn new(ec: &EllipticCurve, x: BigInt, y: BigInt)
-        -> Result<ECCPoint,ECDSAError>
+        -> Result<ECDSAPoint,ECDSAError>
     {
         if x.is_negative() || y.is_negative() {
             return Err(ECDSAError::InvalidCurvePoint);
@@ -414,7 +414,7 @@ impl ECCPoint {
             return Err(ECDSAError::InvalidCurvePoint);
         }
 
-        Ok(ECCPoint {
+        Ok(ECDSAPoint {
             curve: ec.clone(),
             x: x,
             y: y
@@ -422,8 +422,8 @@ impl ECCPoint {
     }
 
     /// Generate the default point G for the given elliptic curve.
-    pub fn default(ec: &EllipticCurve) -> ECCPoint {
-        ECCPoint {
+    pub fn default(ec: &EllipticCurve) -> ECDSAPoint {
+        ECDSAPoint {
             curve: ec.clone(),
             x: ec.Gx.clone(),
             y: ec.Gy.clone()
@@ -431,7 +431,7 @@ impl ECCPoint {
     }
 
     /// Double the given point along the curve.
-    pub fn double(&self) -> ECCPoint {
+    pub fn double(&self) -> ECDSAPoint {
         let ua = BigInt::from_biguint(Sign::Plus, self.curve.a.clone());
         let up = BigInt::from_biguint(Sign::Plus, self.curve.p.clone());
         // lambda = (3 * xp ^ 2 + a) / 2 yp
@@ -448,11 +448,11 @@ impl ECCPoint {
         let yr_left = &lambda * &xdiff;
         let yr = (&yr_left - &self.y).mod_floor(&up);
         //
-        ECCPoint{ curve: self.curve.clone(), x: xr, y: yr }
+        ECDSAPoint{ curve: self.curve.clone(), x: xr, y: yr }
     }
 
     /// Add this point to another point, returning the new point.
-    pub fn add(&self, other: &ECCPoint) -> ECCPoint {
+    pub fn add(&self, other: &ECDSAPoint) -> ECDSAPoint {
         assert!(self.curve == other.curve);
         let xdiff = &self.x - &other.x;
         let ydiff = &self.y - &other.y;
@@ -460,11 +460,11 @@ impl ECCPoint {
         let pp = BigInt::from_biguint(Sign::Plus, self.curve.p.clone());
         let xr = (&(&s * &s) - &self.x - &other.x).mod_floor(&pp);
         let yr = (&s * (&self.x - &xr) - &self.y).mod_floor(&pp);
-        ECCPoint{ curve: self.curve.clone(), x: xr, y: yr }
+        ECDSAPoint{ curve: self.curve.clone(), x: xr, y: yr }
     }
 
     /// Scale this point by the given factor.
-    pub fn scale(&self, d: &BigUint) -> ECCPoint {
+    pub fn scale(&self, d: &BigUint) -> ECDSAPoint {
         assert!(!d.is_zero());
         let one: BigUint = One::one();
         #[allow(non_snake_case)]
@@ -488,26 +488,26 @@ impl ECCPoint {
 
 
 #[derive(Clone,Debug,PartialEq)]
-pub struct ECCKeyPair {
-    pub private: ECCPrivateKey,
-    pub public:  ECCPublicKey
+pub struct ECDSAKeyPair {
+    pub private: ECDSAPrivateKey,
+    pub public:  ECDSAPublicKey
 }
 
-impl ECCKeyPair {
+impl ECDSAKeyPair {
     /// Generate new key pair against the given curve. This uses `OsRng` under
     /// the hood, which is supposed to be pretty good.
     pub fn generate(params: &EllipticCurve)
-        -> ECCKeyPair
+        -> ECDSAKeyPair
     {
         let mut rng = OsRng::new().unwrap();
-        ECCKeyPair::generate_w_rng(&mut rng, params)
+        ECDSAKeyPair::generate_w_rng(&mut rng, params)
 
     }
 
     /// Generate a new key pair, but use the given RNG. You should pick a
     /// good one.
     pub fn generate_w_rng<G: Rng>(rng: &mut G, params: &EllipticCurve)
-        -> ECCKeyPair
+        -> ECDSAKeyPair
     {
         let one: BigUint = One::one();
         #[allow(non_snake_case)]
@@ -521,13 +521,13 @@ impl ECCKeyPair {
         let nm1 = &params.n - &one;
         let d = c.mod_floor(&nm1) + &one;
         #[allow(non_snake_case)]
-        let Q = ECCPoint::default(params).scale(&d);
-        ECCKeyPair {
-            private: ECCPrivateKey {
+        let Q = ECDSAPoint::default(params).scale(&d);
+        ECDSAKeyPair {
+            private: ECDSAPrivateKey {
                 curve: params.clone(),
                 d: d
             },
-            public: ECCPublicKey {
+            public: ECDSAPublicKey {
                 curve: params.clone(),
                 Q: Q
             }
@@ -536,15 +536,15 @@ impl ECCKeyPair {
 }
 
 #[derive(Clone,Debug,PartialEq)]
-pub struct ECCPrivateKey {
+pub struct ECDSAPrivateKey {
     pub curve: EllipticCurve,
     d: BigUint
 }
 
-impl ECCPrivateKey {
+impl ECDSAPrivateKey {
     /// Instantiate a private key against the given curve and value.
-    pub fn new(c: &EllipticCurve, d: &BigUint) -> ECCPrivateKey {
-        ECCPrivateKey {
+    pub fn new(c: &EllipticCurve, d: &BigUint) -> ECDSAPrivateKey {
+        ECDSAPrivateKey {
             curve: c.clone(),
             d: d.clone()
         }
@@ -598,7 +598,7 @@ impl ECCPrivateKey {
             //
             //    If r turns out to be zero, a new k should be selected and r
             //    computed again (this is an utterly improbable occurrence).
-            let g = ECCPoint::default(&self.curve);
+            let g = ECDSAPoint::default(&self.curve);
             let kg = g.scale(&k);
             let qi = BigInt::from_biguint(Sign::Plus, self.curve.n.clone());
             let r = kg.x.mod_floor(&qi);
@@ -627,15 +627,15 @@ impl ECCPrivateKey {
 
 #[allow(non_snake_case)]
 #[derive(Clone,Debug,PartialEq)]
-pub struct ECCPublicKey {
+pub struct ECDSAPublicKey {
     pub curve: EllipticCurve,
-    pub Q: ECCPoint
+    pub Q: ECDSAPoint
 }
 
-impl ECCPublicKey {
+impl ECDSAPublicKey {
     /// Instantiate the given public key.
-    pub fn new(curve: &EllipticCurve, point: &ECCPoint) -> ECCPublicKey {
-        ECCPublicKey {
+    pub fn new(curve: &EllipticCurve, point: &ECDSAPoint) -> ECDSAPublicKey {
+        ECDSAPublicKey {
             curve: curve.clone(),
             Q: point.clone()
         }
@@ -676,7 +676,7 @@ impl ECCPublicKey {
         let u2 = (&sig.r * &w).mod_floor(&self.curve.n);
         // 6. Calculate the curve point (x1, y1) = u1 * G + u2 * Qa. If
         // (x1, y1) = O then the signature is invalid.
-        let curve_g = ECCPoint::default(&self.curve);
+        let curve_g = ECDSAPoint::default(&self.curve);
         let v = curve_g.scale(&u1).add(&self.Q.scale(&u2));
         // if v = r, then the signature is verified
         match v.x.to_biguint() {
@@ -705,9 +705,9 @@ mod tests {
                           0x9e, 0x04, 0xb7, 0x9d, 0x22, 0x78, 0x73, 0xd1];
         let x = BigInt::from_bytes_be(Sign::Plus, &xbytes);
         let y = BigInt::from_bytes_be(Sign::Plus, &ybytes);
-        let base = ECCPoint::default(&EllipticCurve::p256());
+        let base = ECDSAPoint::default(&EllipticCurve::p256());
         let res = base.double();
-        let goal = ECCPoint{ curve: base.curve.clone(), x: x, y: y };
+        let goal = ECDSAPoint{ curve: base.curve.clone(), x: x, y: y };
         assert_eq!(res, goal);
     }
 
@@ -723,9 +723,9 @@ mod tests {
                           0x9a, 0x79, 0xb1, 0x27, 0xa2, 0x7d, 0x50, 0x32];
         let x = BigInt::from_bytes_be(Sign::Plus, &xbytes);
         let y = BigInt::from_bytes_be(Sign::Plus, &ybytes);
-        let base = ECCPoint::default(&EllipticCurve::p256());
+        let base = ECDSAPoint::default(&EllipticCurve::p256());
         let res = base.add(&base.double());
-        let goal = ECCPoint{ curve: base.curve.clone(), x: x, y: y };
+        let goal = ECDSAPoint{ curve: base.curve.clone(), x: x, y: y };
         assert_eq!(res, goal);
     }
 
@@ -741,9 +741,9 @@ mod tests {
                           0xe8, 0x5a, 0x22, 0x4a, 0x4d, 0xd0, 0x48, 0xfa];
         let x = BigInt::from_bytes_be(Sign::Plus, &xbytes);
         let y = BigInt::from_bytes_be(Sign::Plus, &ybytes);
-        let base = ECCPoint::default(&EllipticCurve::p256());
+        let base = ECDSAPoint::default(&EllipticCurve::p256());
         let res = base.scale(&BigUint::from(9 as u64));
-        let goal = ECCPoint{ curve: base.curve.clone(), x: x, y: y };
+        let goal = ECDSAPoint{ curve: base.curve.clone(), x: x, y: y };
         assert_eq!(res, goal);
     }
 
@@ -751,7 +751,7 @@ mod tests {
     fn p256_sign_verify() {
         for _ in 0..NUM_TESTS {
             let curve = EllipticCurve::p256();
-            let pair = ECCKeyPair::generate(&curve);
+            let pair = ECDSAKeyPair::generate(&curve);
             let msg = vec![0,0,1,2,3,4,5,0,0];
             let sig = pair.private.sign::<Sha256>(&msg);
             assert!(pair.public.verify::<Sha256>(&msg, &sig));
@@ -762,7 +762,7 @@ mod tests {
     fn p384_sign_verify() {
         for _ in 0..NUM_TESTS {
             let curve = EllipticCurve::p384();
-            let pair = ECCKeyPair::generate(&curve);
+            let pair = ECDSAKeyPair::generate(&curve);
             let msg = vec![0,0,1,2,3,4,5,0,0,9,9];
             let sig = pair.private.sign::<Sha512>(&msg);
             assert!(pair.public.verify::<Sha512>(&msg, &sig));
