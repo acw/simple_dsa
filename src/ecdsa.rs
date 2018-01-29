@@ -629,7 +629,7 @@ impl ECCPrivateKey {
 #[derive(Clone,Debug,PartialEq)]
 pub struct ECCPublicKey {
     pub curve: EllipticCurve,
-    Q: ECCPoint
+    pub Q: ECCPoint
 }
 
 impl ECCPublicKey {
