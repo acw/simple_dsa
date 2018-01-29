@@ -666,7 +666,7 @@ impl ECCPublicKey {
                                                  .map(|x| *x)
                                                  .collect();
                   let n = self.curve.n.bits();
-                  let len = min(n, bytes.len());
+                  let len = min(n / 8, bytes.len());
                   bytes.truncate(len);
                   BigUint::from_bytes_be(&bytes) };
         // 4. Calculate w = (s)^-1 mod n;
@@ -688,7 +688,7 @@ impl ECCPublicKey {
 
 #[cfg(test)]
 mod tests {
-    use sha2::{Sha256};
+    use sha2::{Sha256,Sha512};
     use super::*;
 
     const NUM_TESTS: usize = 20;
@@ -755,6 +755,17 @@ mod tests {
             let msg = vec![0,0,1,2,3,4,5,0,0];
             let sig = pair.private.sign::<Sha256>(&msg);
             assert!(pair.public.verify::<Sha256>(&msg, &sig));
+        }
+    }
+
+    #[test]
+    fn p384_sign_verify() {
+        for _ in 0..NUM_TESTS {
+            let curve = EllipticCurve::p384();
+            let pair = ECCKeyPair::generate(&curve);
+            let msg = vec![0,0,1,2,3,4,5,0,0,9,9];
+            let sig = pair.private.sign::<Sha512>(&msg);
+            assert!(pair.public.verify::<Sha512>(&msg, &sig));
         }
     }
 
