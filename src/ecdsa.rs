@@ -302,7 +302,8 @@ impl EllipticCurve {
 pub enum ECDSAError {
     ASN1DecodeErr(ASN1DecodeErr),
     ASN1EncodeErr(ASN1EncodeErr),
-    UnrecognizedCurve
+    UnrecognizedCurve,
+    InvalidCurvePoint
 }
 
 impl From<ASN1DecodeErr> for ECDSAError {
@@ -389,6 +390,37 @@ pub struct ECCPoint {
 }
 
 impl ECCPoint {
+    /// Generate the provided point on the given curve. This function returns
+    /// a `Result` because it will validate that the point created is actually
+    /// on the curve.
+    pub fn new(ec: &EllipticCurve, x: BigInt, y: BigInt)
+        -> Result<ECCPoint,ECDSAError>
+    {
+        if x.is_negative() || y.is_negative() {
+            return Err(ECDSAError::InvalidCurvePoint);
+        }
+
+        let xu = x.to_biguint().unwrap();
+        let yu = y.to_biguint().unwrap();
+
+        if (&xu >= &ec.p) || (&yu >= &ec.p) {
+            return Err(ECDSAError::InvalidCurvePoint);
+        }
+
+        let y2 = (&yu * &yu) % &ec.p;
+        let x3axb = ((&xu * &xu * &xu) + (&ec.a * &xu) + &ec.b) % &ec.p;
+
+        if y2 != x3axb {
+            return Err(ECDSAError::InvalidCurvePoint);
+        }
+
+        Ok(ECCPoint {
+            curve: ec.clone(),
+            x: x,
+            y: y
+        })
+    }
+
     /// Generate the default point G for the given elliptic curve.
     pub fn default(ec: &EllipticCurve) -> ECCPoint {
         ECCPoint {
